@@ -1,12 +1,12 @@
 # Test Suite
 
-Scripts for verifying setup and benchmarking algorithms against generated maps.
+Scripts for generating maps and benchmarking algorithms.
 
 ---
 
 ## Setup
 
-Install the project from the root directory first:
+Install the project from the root directory first (one-time):
 
 ```bash
 pip install -e .
@@ -15,17 +15,25 @@ pip install numpy pillow
 
 ---
 
-## init_test_suite.py
+## init_test_suite.py — Map Generation
 
-Verifies the full pipeline end-to-end: map generation, solvability checking, A* solve, and visualisation output.
+Generates solvable maps and saves them as `.npy` files. Each map is verified by A* before being saved; unsolvable candidates are silently discarded and regenerated.
 
 ```bash
-# Generate 5 solvable 2D maps at 100x100
-python "Test Suite/init_test_suite.py" -dims 2 -num_maps 5 -xdim 100 -ydim 100
+# Minimal — 1 map at default size (100×100)
+python "Test Suite/init_test_suite.py" -dims 2
 
-# Generate 3 solvable 3D maps at 30x30x30
-python "Test Suite/init_test_suite.py" -dims 3 -num_maps 3 -xdim 30 -ydim 30 -zdim 30
+# 10 maps at 200×200, .npy files only (fastest, no images)
+python "Test Suite/init_test_suite.py" -dims 2 -num_maps 10 -xdim 200 -ydim 200 --output npy
+
+# 5 maps at 100×100, save .npy + map images
+python "Test Suite/init_test_suite.py" -dims 2 -num_maps 5 -xdim 100 -ydim 100 --output npy maps
+
+# 3D maps
+python "Test Suite/init_test_suite.py" -dims 3 -num_maps 3 -xdim 30 -ydim 30 -zdim 30 --output npy
 ```
+
+**Arguments:**
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -34,40 +42,65 @@ python "Test Suite/init_test_suite.py" -dims 3 -num_maps 3 -xdim 30 -ydim 30 -zd
 | `-xdim` | no | `100` | Width |
 | `-ydim` | no | `100` | Height |
 | `-zdim` | no | `30` | Depth (3D only) |
-| `--output` | no | all | Space-separated list of `maps`, `paths`, `npy` |
+| `--output` | no | all | Space-separated: `npy`, `maps`, `paths` |
 
 **`--output` values:**
 
 | Value | Saves |
 |-------|-------|
-| `npy` | `.npy` grid file + `start_end_points.csv` per map |
-| `maps` | PNG image of the raw map (2D) or per-slice PNGs (3D) |
-| `paths` | A* path overlay PNG (2D) / path length printed (3D) |
+| `npy` | `.npy` grid file + `start_end_points.csv` |
+| `maps` | Raw map PNG — white = free, black = obstacle |
+| `paths` | A* path overlay PNG (2D) or path length printed (3D) |
 
-```bash
-# Only .npy files, no images
-python "Test Suite/init_test_suite.py" -dims 2 -num_maps 10 -xdim 200 -ydim 200 --output npy
-
-# Only map images, skip A*
-python "Test Suite/init_test_suite.py" -dims 2 -num_maps 5 --output maps
-
-# Path overlays only (no raw map PNGs, no .npy)
-python "Test Suite/init_test_suite.py" -dims 2 -num_maps 5 --output paths
-```
-
-For each map the script:
-1. Generates a solvable map (A* verified internally by the generator)
-2. Saves the raw map image
-3. Runs A* and saves the path overlay (2D) or prints path length (3D)
-
-All output is written to `Test Suite/output/`.
+Output lands in `Test Suite/output/2d_maps/` or `Test Suite/output/3d_maps/`.
 
 ---
 
-## Output images
+## run_test_suite_frontier_voltage_boost_laplace.py
 
-| File | Description |
-|------|-------------|
-| `output/map_2d.png` | Raw 2D map — white = free, black = obstacle |
-| `output/astar_result_2d.png` | Path overlaid — blue = path, green = start, red = end |
-| `output/map_3d_slices/slice_ZZZZ.png` | One grayscale image per Z-slice of the 3D map |
+Runs Frontier Voltage Boost Laplace against a map folder produced by `init_test_suite.py`.
+
+```bash
+# Basic run — all output types
+python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" \
+    --maps_dir "Test Suite/output/2d_maps" \
+    --laplace_iters 10 \
+    --epsilon 0.5
+
+# Custom step size, selective output
+python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" \
+    --maps_dir "Test Suite/output/2d_maps" \
+    --laplace_iters 20 \
+    --epsilon 0.3 \
+    --step_size 0.5 \
+    --output paths phi
+```
+
+**Arguments:**
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--maps_dir` | yes | — | Folder with `.npy` files and `start_end_points.csv` |
+| `--laplace_iters` | yes | — | Laplace iterations per wavefront step (`n_l`) |
+| `--epsilon` | yes | — | Solved threshold: cell solved when `φ ≤ v_max − ε` |
+| `--step_size` | no | `1.0` | Gradient descent step size |
+| `--output` | no | all | Space-separated: `maps`, `paths`, `phi` |
+
+**`--output` values:**
+
+| Value | Saves |
+|-------|-------|
+| `maps` | Raw map PNG |
+| `paths` | Path overlay — blue path, green start, red end |
+| `phi` | Potential field φ as grayscale heatmap — darker = closer to goal |
+
+Results are written to `<maps_dir>/fvb_results/`, one file per map per output type:
+
+```
+fvb_results/
+├── map_0_map.png
+├── map_0_path.png
+├── map_0_phi.png
+├── map_1_map.png
+└── ...
+```

@@ -134,14 +134,20 @@ class AStarAlgorithm(BaseAlgorithm):
 
     def _visualize_2d(self):
         from PIL import Image
-        img = Image.fromarray(self.map.to_image(), mode='L').convert('RGB')
-        pixels = img.load()
+        grey = self.map.to_image()
+        rgb = np.stack([grey, grey, grey], axis=2).copy()
+
         if self._path:
             for x, y in self._path:
-                pixels[x, y] = (128, 128, 255)
-        pixels[self.map.start[0], self.map.start[1]] = (0, 255, 0)
-        pixels[self.map.end[0],   self.map.end[1]]   = (255, 0, 0)
-        img.save('astar_result.png')
+                if 0 <= y < rgb.shape[0] and 0 <= x < rgb.shape[1]:
+                    rgb[y, x] = [128, 128, 255]
+
+        sx, sy = self.map.start
+        ex, ey = self.map.end
+        rgb[sy, sx] = [0, 255, 0]
+        rgb[ey, ex] = [255, 0, 0]
+
+        Image.fromarray(rgb, mode='RGB').save('astar_result.png')
 
     def _visualize_3d(self):
         self.map.save_image_slices('astar_result_3d')
