@@ -5,11 +5,13 @@ from Algorithms import Algorithm2D
 
 class FrontierVoltageBoostLaplace(Algorithm2D):
 
-    def __init__(self, map, n_l: int, epsilon: float, step_size: float = 1.0):
+    def __init__(self, map, n_l: int, epsilon: float, step_size: float = 1.0,
+                 bilinear_interpolation: bool = True):
         super().__init__(map)
         self.n_l = n_l
         self.epsilon = epsilon
         self.step_size = step_size
+        self.bilinear_interpolation = bilinear_interpolation
         self._path = None
         self._phi = None
 
@@ -90,6 +92,8 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
         Follow steepest descent of phi from start to end.
         floor_voltage caps each neighbour's contribution to ceil(current voltage),
         preventing the path from skipping over wavefront boundaries.
+        When bilinear_interpolation is True, phi is sampled at continuous positions
+        using bilinear interpolation instead of nearest-cell indexing.
         """
         sx, sy = start
         ex, ey = end
@@ -100,19 +104,17 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
         path = [(round(posc), round(posr))]
 
         for _ in range(10000):
-            r = math.floor(posr)
-            c = math.floor(posc)
-
-            if not (0 < r < phi.shape[0] - 1 and 0 < c < phi.shape[1] - 1):
+            if not (0 < posr < phi.shape[0] - 1 and 0 < posc < phi.shape[1] - 1):
                 return None
 
-            point_v = phi[r, c]
-
-            def floor_v(nv, pv=point_v):
-                return min(nv, math.ceil(pv))
-
-            gradr = floor_v(phi[r + 1, c]) - floor_v(phi[r - 1, c])
-            gradc = floor_v(phi[r, c + 1]) - floor_v(phi[r, c - 1])
+            if self.bilinear_interpolation:
+                gradr, gradc = self._get_grad_bilinear(phi, posr, posc)
+            else:
+                r = math.floor(posr)
+                c = math.floor(posc)
+                point_v = phi[r, c]
+                gradr = self._fv(phi[r + 1, c], point_v) - self._fv(phi[r - 1, c], point_v)
+                gradc = self._fv(phi[r, c + 1], point_v) - self._fv(phi[r, c - 1], point_v)
 
             mag = math.sqrt(gradr ** 2 + gradc ** 2)
             if mag == 0:
@@ -129,6 +131,34 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
                 return path
 
         return None
+
+    @staticmethod
+    def _bilinear_interp(phi, r, c):
+        r0, c0 = math.floor(r), math.floor(c)
+        r1, c1 = r0 + 1, c0 + 1
+        r0 = max(0, min(r0, phi.shape[0] - 1))
+        r1 = max(0, min(r1, phi.shape[0] - 1))
+        c0 = max(0, min(c0, phi.shape[1] - 1))
+        c1 = max(0, min(c1, phi.shape[1] - 1))
+        dr = r - math.floor(r)
+        dc = c - math.floor(c)
+        return (  (1 - dr) * (1 - dc) * phi[r0, c0]
+                + (1 - dr) *      dc  * phi[r0, c1]
+                +      dr  * (1 - dc) * phi[r1, c0]
+                +      dr  *      dc  * phi[r1, c1])
+
+    @staticmethod
+    def _fv(nv, pv):
+        """Cap neighbour value to ceil(current value) to stay within the active wavefront."""
+        return min(nv, math.ceil(pv))
+
+    def _get_grad_bilinear(self, phi, posr, posc):
+        point_v = self._bilinear_interp(phi, posr, posc)
+        gradr = (self._fv(self._bilinear_interp(phi, posr + 1, posc), point_v) -
+                 self._fv(self._bilinear_interp(phi, posr - 1, posc), point_v))
+        gradc = (self._fv(self._bilinear_interp(phi, posr, posc + 1), point_v) -
+                 self._fv(self._bilinear_interp(phi, posr, posc - 1), point_v))
+        return gradr, gradc
 
     def _visualize(self):
         from PIL import Image

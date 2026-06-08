@@ -56,10 +56,10 @@ Full argument reference: see [Test Suite/README.md](Test%20Suite/README.md).
 Point the runner at the folder produced in step 2 and supply the two required algorithm parameters:
 
 ```bash
-python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" \
-    --maps_dir "Test Suite/output/2d_maps" \
-    --laplace_iters 10 \
-    --epsilon 0.5
+python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" `
+    --maps_dir "Test Suite/output/2d_maps" `
+    --laplace_iters 200 `
+    --epsilon 0.0001
 ```
 
 Results are written to `Test Suite/output/2d_maps/fvb_results/`.
@@ -72,6 +72,7 @@ Results are written to `Test Suite/output/2d_maps/fvb_results/`.
 | `--laplace_iters` | yes | — | Laplace iterations per wavefront step (`n_l`) |
 | `--epsilon` | yes | — | Solved threshold: cell is solved when `φ ≤ v_max − ε` |
 | `--step_size` | no | `1.0` | Gradient descent step size |
+| `--no_bilinear` | no | off | Disable bilinear interpolation for gradient sampling (on by default) |
 | `--output` | no | all | Space-separated: `maps`, `paths`, `phi` |
 
 **`--output` values:**
@@ -84,11 +85,11 @@ Results are written to `Test Suite/output/2d_maps/fvb_results/`.
 
 ```bash
 # Only save path overlays and potential field
-python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" \
-    --maps_dir "Test Suite/output/2d_maps" \
-    --laplace_iters 20 \
-    --epsilon 0.3 \
-    --step_size 0.5 \
+python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" `
+    --maps_dir "Test Suite/output/2d_maps" `
+    --laplace_iters 200 `
+    --epsilon 0.0001 `
+    --step_size 0.5 `
     --output paths phi
 ```
 

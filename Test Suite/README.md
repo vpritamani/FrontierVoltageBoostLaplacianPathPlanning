@@ -62,17 +62,17 @@ Runs Frontier Voltage Boost Laplace against a map folder produced by `init_test_
 
 ```bash
 # Basic run — all output types
-python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" \
-    --maps_dir "Test Suite/output/2d_maps" \
-    --laplace_iters 10 \
-    --epsilon 0.5
+python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" `
+    --maps_dir "Test Suite/output/2d_maps" `
+    --laplace_iters 200 `
+    --epsilon 0.0001
 
 # Custom step size, selective output
-python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" \
-    --maps_dir "Test Suite/output/2d_maps" \
-    --laplace_iters 20 \
-    --epsilon 0.3 \
-    --step_size 0.5 \
+python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" `
+    --maps_dir "Test Suite/output/2d_maps" `
+    --laplace_iters 200 `
+    --epsilon 0.0001 `
+    --step_size 0.5 `
     --output paths phi
 ```
 
@@ -84,6 +84,7 @@ python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" \
 | `--laplace_iters` | yes | — | Laplace iterations per wavefront step (`n_l`) |
 | `--epsilon` | yes | — | Solved threshold: cell solved when `φ ≤ v_max − ε` |
 | `--step_size` | no | `1.0` | Gradient descent step size |
+| `--no_bilinear` | no | off | Disable bilinear interpolation for gradient sampling (on by default) |
 | `--output` | no | all | Space-separated: `maps`, `paths`, `phi` |
 
 **`--output` values:**

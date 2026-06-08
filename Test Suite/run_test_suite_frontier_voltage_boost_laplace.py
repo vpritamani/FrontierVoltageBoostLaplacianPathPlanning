@@ -56,6 +56,8 @@ parser.add_argument('--epsilon',       required=True, type=float,
                     help='Convergence threshold — cell is solved when φ ≤ v_max - epsilon.')
 parser.add_argument('--step_size',     type=float, default=1.0,
                     help='Gradient descent step size (default: 1.0).')
+parser.add_argument('--no_bilinear',   action='store_true',
+                    help='Disable bilinear interpolation for gradient descent (default: on).')
 parser.add_argument('--output',        nargs='+', default=['maps', 'paths', 'phi'],
                     choices=['maps', 'paths', 'phi'],
                     help='Output types: maps (raw PNG), paths (path overlay PNG), '
@@ -79,6 +81,7 @@ print(f"Maps dir:      {maps_dir}")
 print(f"laplace_iters: {args.laplace_iters}")
 print(f"epsilon:       {args.epsilon}")
 print(f"step_size:     {args.step_size}")
+print(f"bilinear:      {not args.no_bilinear}")
 print(f"Output:        {', '.join(args.output)}\n")
 
 # ---------------------------------------------------------------------------
@@ -105,6 +108,7 @@ for row in rows:
         n_l=args.laplace_iters,
         epsilon=args.epsilon,
         step_size=args.step_size,
+        bilinear_interpolation=not args.no_bilinear,
     )
     path = algo.solve()
 
