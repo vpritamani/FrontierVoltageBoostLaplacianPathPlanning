@@ -95,6 +95,27 @@ python "Test Suite/run_test_suite_frontier_voltage_boost_laplace.py" `
 
 ---
 
+## 4. Run 3D Frontier Voltage Boost Laplace
+
+Generate 3D maps first, then point the 3D runner at them:
+
+```bash
+# Generate 3D maps
+python "Test Suite/init_test_suite.py" -dims 3 -num_maps 3 -xdim 30 -ydim 30 -zdim 30 --output npy
+
+# Run the 3D algorithm
+python "Test Suite/run_test_suite_frontier_voltage_boost_laplace_3d.py" `
+    --maps_dir "Test Suite/output/3d_maps" `
+    --laplace_iters 200 `
+    --epsilon 0.0001
+```
+
+Results are written to `Test Suite/output/3d_maps/fvb_results/<map_name>/` as per-z-slice PNGs.
+
+Full argument reference: see [Test Suite/README.md](Test%20Suite/README.md).
+
+---
+
 ## Project Structure
 
 ```
@@ -123,6 +144,7 @@ FrontierVoltageBoostLaplacianPathPlanning/
 ├── Test Suite/
 │   ├── init_test_suite.py        # Map generation script
 │   ├── run_test_suite_frontier_voltage_boost_laplace.py
+│   ├── run_test_suite_frontier_voltage_boost_laplace_3d.py
 │   └── main.py                   # Full benchmark runner
 ├── pyproject.toml
 └── README.md
@@ -137,6 +159,7 @@ BaseAlgorithm  (algorithm.py)
 ├── Algorithm2D  (2dalgorithm.py)        — for algorithms that only work in 2D
 │   └── FrontierVoltageBoostLaplace
 ├── Algorithm3D  (3dalgorithm.py)        — for algorithms that only work in 3D
+│   └── FrontierVoltageBoostLaplace3D
 └── AStarAlgorithm  (astar.py)           — dimension-agnostic, reads grid.ndim at solve time
 ```
 
