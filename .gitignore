@@ -9,6 +9,9 @@ __pycache__/
 # Test Suite generated output
 Test Suite/output/
 
+# Benchmark app data (map sets + run results)
+Benchmark Data/
+
 # Generated map files
 *.npy
 start_end_points.csv
