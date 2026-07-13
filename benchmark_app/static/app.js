@@ -16,17 +16,21 @@ const S = {
 /* Run-form state — survives tab switches and re-renders. */
 const F = {
   source: 'new',                    // 'new' | 'existing'
-  gen: { name: '', dims: 2, width: 100, height: 100, depth: 30,
+  gen: { name: '', mode: '2', width: 100, height: 100, depth: 30,
+         shape: '12,12,12,8',
          num_maps: 5, obstacles_min: 5, obstacles_max: 30, seed: '' },
   mapSetId: null,
   mapSel: null,                     // null = all maps, else Set of map names
-  algos: {},                        // id -> {on: bool, params: {}}
+  algoList: [],                     // [{id, params}] — instances, duplicates allowed
+  addForm: null,                    // {id, params} being configured
   runName: '',
   timeout: 120,
+  theta: 30,
+  sweep: 5,
 };
 
 const METRIC_OPTIONS = [
-  { key: 'steering_penalty', label: 'Steering penalty @30° (recommended)', src: 'metrics' },
+  { key: 'steering_penalty', label: 'Steering penalty @ θ (recommended)', src: 'metrics', steer: true },
   { key: 'time_s', label: 'Solve time (s)', src: 'rec' },
   { key: 'path_length_euclidean', label: 'Path length (Euclidean)', src: 'rec' },
   { key: 'path_steps', label: 'Path steps', src: 'rec' },
@@ -38,13 +42,20 @@ const METRIC_OPTIONS = [
 ];
 let compareMetric = 'steering_penalty';
 
+/* Steering θ used by comparison views (run detail + compare tab + graph). */
+const STEER = { theta: 30, sweep: 5 };
+
+/* Cache of recomputed steering values: `${runId}|${theta}|${sweep}` -> results[] */
+const steerCache = new Map();
+
 /* Metrics-lab state: preview holds an unsaved recompute for the open run. */
 const LAB = { theta: 30, sweep: 5, preview: null, runId: null };
 
 /* Cross-run compare state. */
-const CMP = { sel: new Set(), metric: 'steering_penalty', cache: new Map() };
+const CMP = { sel: new Set(), metric: 'steer|30|5', cache: new Map(),
+              graph: { mode: 'scatter', x: 'mean_time_s', y: 'steer|30|5', z: 'none' } };
 
-/* Decoded grid cache for 3D viewers: key "msId/mapName" -> {shape, data}. */
+/* Decoded grid cache for viewers: key "msId/mapName" -> {shape, data}. */
 const GRIDS = new Map();
 
 const TERMINAL = ['done', 'error', 'interrupted', 'cancelled'];
@@ -84,13 +95,41 @@ function chipStyle(algoId) {
   return `background: var(--cat-${slot})`;
 }
 
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function chipHex(algoId) {
+  const idx = S.registry.findIndex(r => r.id === algoId);
+  const slot = (idx >= 0 ? idx : 0) % 8 + 1;
+  return cssVar(`--cat-${slot}`) || '#2a78d6';
+}
+
 function statusChip(st) {
   return `<span class="status st-${esc(st)}">${esc(st)}</span>`;
 }
 
 function msLabel(ms) {
-  const size = ms.dims === 3 ? `${ms.width}×${ms.height}×${ms.depth}` : `${ms.width}×${ms.height}`;
+  const size = (ms.shape && ms.shape.length)
+    ? ms.shape.join('×')
+    : (ms.dims === 3 ? `${ms.width}×${ms.height}×${ms.depth}` : `${ms.width}×${ms.height}`);
   return `${ms.name} — ${ms.dims}D · ${ms.num_maps} maps · ${size}`;
+}
+
+function paramsSummary(params) {
+  return Object.entries(params || {})
+    .map(([k, v]) => `${k}=${typeof v === 'boolean' ? (v ? 'on' : 'off') : v}`)
+    .join(', ');
+}
+
+/* Instance key of a result record or manifest algorithm entry (back-compat). */
+function recKey(r) { return r.algorithm_key || r.algorithm_id; }
+function algoKey(a) { return a.key || a.id; }
+
+/* Instance display label — always states the hyperparameters. */
+function instLabel(algorithms, entry) {
+  const ps = paramsSummary(entry.params);
+  return ps ? `${entry.label} (${ps})` : entry.label;
 }
 
 /* ===================== modal ===================== */
@@ -124,7 +163,7 @@ $('#modal-backdrop').addEventListener('click', e => {
 });
 $('#modal-confirm').addEventListener('click', async () => {
   if (modalConfirmCb) {
-    try { await modalConfirmCb(); } catch (e) { alert(e.message); }
+    try { await modalConfirmCb(); } catch (e) { alert(e.message); return; }
   }
   hideModal();
 });
@@ -192,8 +231,16 @@ function switchTab(name) {
 
 /* ===================== RUN TAB ===================== */
 
+function genDims() {
+  if (F.gen.mode === 'nd') {
+    const parts = String(F.gen.shape).split(',').map(s => s.trim()).filter(Boolean);
+    return parts.length || null;
+  }
+  return Number(F.gen.mode);
+}
+
 function currentDims() {
-  if (F.source === 'new') return Number(F.gen.dims);
+  if (F.source === 'new') return genDims();
   const ms = S.mapSets.find(m => m.id === F.mapSetId);
   return ms ? ms.dims : null;
 }
@@ -216,7 +263,7 @@ function renderRunTab() {
 
     <div class="card">
       <h2>2 · Algorithms ${dims ? `<span style="font-weight:400;color:var(--muted)">(for ${dims}D maps)</span>` : ''}</h2>
-      <div id="algo-list"></div>
+      <div id="algo-builder"></div>
     </div>
 
     <div class="card">
@@ -224,28 +271,19 @@ function renderRunTab() {
       <div class="row">
         <div class="field" style="min-width:220px">
           <label>Run name (optional)</label>
-          <input type="text" id="run-name" value="${esc(F.runName)}" placeholder="e.g. fvb vs astar, 100x100">
+          <input type="text" id="run-name" value="${esc(F.runName)}" placeholder="e.g. fvb sweep, 100x100">
         </div>
         <div class="field">
           <label>Per-solve timeout (s)</label>
           <input type="number" id="run-timeout" value="${F.timeout}" min="5" step="5">
           <span class="hint">Hard kill per (map, algorithm)</span>
         </div>
-        <div class="field">
-          <label>Steering θ (°)</label>
-          <input type="number" id="run-theta" value="${F.theta ?? 30}" min="0" max="180" step="5">
-          <span class="hint">Penalty threshold</span>
-        </div>
-        <div class="field">
-          <label>Steering sweep</label>
-          <input type="number" id="run-sweep" value="${F.sweep ?? 5}" min="1" step="1">
-          <span class="hint">Neighbor offsets</span>
-        </div>
         <button class="btn btn-primary" id="start-run">Start run</button>
       </div>
       <p class="hint" style="color:var(--muted);font-size:12px;margin:8px 0 0">
-        Metric parameters only affect how smoothness is computed — you can recompute
-        metrics on stored paths later without re-running the planners.
+        Solved paths are stored with the run — smoothness metric hyperparameters
+        (steering θ, sweep) are chosen later in Results / Compare and can be changed
+        anytime without re-running the planners.
       </p>
       <div id="run-msg" style="margin-top:10px"></div>
     </div>`;
@@ -255,19 +293,18 @@ function renderRunTab() {
   }));
   $('#run-name').addEventListener('input', e => { F.runName = e.target.value; });
   $('#run-timeout').addEventListener('input', e => { F.timeout = Number(e.target.value); });
-  $('#run-theta').addEventListener('input', e => { F.theta = Number(e.target.value); });
-  $('#run-sweep').addEventListener('input', e => { F.sweep = Number(e.target.value); });
   $('#start-run').addEventListener('click', startRun);
 
   renderMapsConfig();
-  renderAlgoBlocks();
+  renderAlgoBuilder();
 }
 
 function renderMapsConfig() {
   const box = $('#maps-config');
   if (F.source === 'new') {
     const g = F.gen;
-    const is3d = Number(g.dims) === 3;
+    const is3d = g.mode === '3';
+    const isNd = g.mode === 'nd';
     box.innerHTML = `
       <div class="row">
         <div class="field" style="min-width:200px">
@@ -275,25 +312,35 @@ function renderMapsConfig() {
           <input type="text" data-g="name" value="${esc(g.name)}" placeholder="e.g. dense 100x100">
         </div>
         <div class="field"><label>Dimensions</label>
-          <select data-g="dims">
-            <option value="2" ${!is3d ? 'selected' : ''}>2D</option>
-            <option value="3" ${is3d ? 'selected' : ''}>3D</option>
+          <select data-g="mode">
+            <option value="2" ${g.mode === '2' ? 'selected' : ''}>2D</option>
+            <option value="3" ${g.mode === '3' ? 'selected' : ''}>3D</option>
+            <option value="nd" ${isNd ? 'selected' : ''}>ND (custom shape)</option>
           </select>
         </div>
-        <div class="field"><label>Width</label><input type="number" data-g="width" value="${g.width}" min="4"></div>
-        <div class="field"><label>Height</label><input type="number" data-g="height" value="${g.height}" min="4"></div>
-        ${is3d ? `<div class="field"><label>Depth</label><input type="number" data-g="depth" value="${g.depth}" min="4"></div>` : ''}
+        ${isNd ? `
+          <div class="field" style="min-width:200px">
+            <label>Shape (x, y, z, …)</label>
+            <input type="text" data-g="shape" value="${esc(g.shape)}" placeholder="12,12,12,8">
+            <span class="hint">${genDims() || '?'}D — one size per axis</span>
+          </div>`
+        : `
+          <div class="field"><label>Width</label><input type="number" data-g="width" value="${g.width}" min="4"></div>
+          <div class="field"><label>Height</label><input type="number" data-g="height" value="${g.height}" min="4"></div>
+          ${is3d ? `<div class="field"><label>Depth</label><input type="number" data-g="depth" value="${g.depth}" min="4"></div>` : ''}
+        `}
         <div class="field"><label># Maps</label><input type="number" data-g="num_maps" value="${g.num_maps}" min="1"></div>
         <div class="field"><label>Obstacles min</label><input type="number" data-g="obstacles_min" value="${g.obstacles_min}" min="0"></div>
         <div class="field"><label>Obstacles max</label><input type="number" data-g="obstacles_max" value="${g.obstacles_max}" min="0"></div>
         <div class="field"><label>Seed (optional)</label><input type="number" data-g="seed" value="${esc(g.seed)}" placeholder="random"></div>
       </div>
       <p class="hint" style="color:var(--muted);font-size:12px;margin:8px 0 0">
-        Maps are verified solvable with A* before being accepted. Start/end points are placed away from the border.
+        2D/3D maps are verified solvable with A*; ND maps with face-neighbour BFS.
+        Start/end points are placed away from the border.
       </p>`;
     $$('[data-g]', box).forEach(inp => inp.addEventListener('change', () => {
       F.gen[inp.dataset.g] = inp.type === 'number' && inp.value !== '' ? Number(inp.value) : inp.value;
-      if (inp.dataset.g === 'dims') { renderRunTab(); }
+      if (inp.dataset.g === 'mode' || inp.dataset.g === 'shape') renderRunTab();
     }));
   } else {
     const readySets = S.mapSets.filter(m => m.status === 'ready');
@@ -329,7 +376,7 @@ function renderMapPicker(ms) {
     const sel = F.mapSel === null || F.mapSel.has(m.name);
     const thumb = ms.dims === 2
       ? `<img loading="lazy" src="/api/map_sets/${esc(ms.id)}/thumb/${esc(m.stem)}.png" alt="">`
-      : `<div style="height:40px;display:flex;align-items:center;justify-content:center;color:var(--muted)">3D</div>`;
+      : `<div style="height:40px;display:flex;align-items:center;justify-content:center;color:var(--muted)">${ms.dims}D</div>`;
     return `<div class="map-pick ${sel ? 'selected' : ''}" data-name="${esc(m.name)}">${thumb}${esc(m.stem)}</div>`;
   }).join('') + `</div>`;
   $$('.map-pick', box).forEach(node => node.addEventListener('click', () => {
@@ -341,47 +388,110 @@ function renderMapPicker(ms) {
   }));
 }
 
-function renderAlgoBlocks() {
+/* ---- algorithm builder: add any number of instances, duplicates allowed ---- */
+
+function specSupports(spec, dims) {
+  return !dims || spec.dims === null || spec.dims === undefined || spec.dims.includes(dims);
+}
+
+function renderAlgoBuilder() {
   const dims = currentDims();
-  const box = $('#algo-list');
-  box.innerHTML = S.registry.map(spec => {
-    if (!F.algos[spec.id]) {
-      F.algos[spec.id] = { on: false, params: Object.fromEntries(spec.params.map(p => [p.name, p.default])) };
-    }
-    const st = F.algos[spec.id];
-    const unsupported = dims && !spec.dims.includes(dims);
+  const box = $('#algo-builder');
+
+  const listHTML = F.algoList.length ? F.algoList.map((inst, i) => {
+    const spec = S.registry.find(r => r.id === inst.id);
+    const ok = spec && specSupports(spec, dims);
+    return `<div class="algo-inst ${ok ? '' : 'bad'}">
+      <span class="chip" style="${chipStyle(inst.id)}"></span>
+      <b>${esc(spec ? spec.label : inst.id)}</b>
+      <span class="inst-params">${esc(paramsSummary(inst.params))}</span>
+      ${ok ? '' : `<span class="inst-warn">not available for ${dims}D</span>`}
+      <button class="btn btn-sm" data-edit-inst="${i}">Edit</button>
+      <button class="btn btn-sm" data-del-inst="${i}">Remove</button>
+    </div>`;
+  }).join('') : `<p class="empty" style="text-align:left;padding:6px 0">No algorithms added yet.</p>`;
+
+  const addOpen = F.addForm !== null;
+  let addHTML;
+  if (!addOpen) {
+    addHTML = `<button class="btn" id="open-add">+ Add algorithm</button>`;
+  } else {
+    const spec = S.registry.find(r => r.id === F.addForm.id) || S.registry[0];
+    const supported = specSupports(spec, dims);
     const paramsHTML = spec.params.map(p => {
-      const val = st.params[p.name];
+      const val = F.addForm.params[p.name];
       if (p.type === 'bool') {
-        return `<label class="check" style="margin-top:18px"><input type="checkbox" data-algo="${esc(spec.id)}" data-param="${esc(p.name)}" ${val ? 'checked' : ''}> ${esc(p.label)}</label>`;
+        return `<label class="check" style="margin-top:18px"><input type="checkbox" data-ap="${esc(p.name)}" ${val ? 'checked' : ''}> ${esc(p.label)}</label>`;
       }
       return `<div class="field">
         <label title="${esc(p.help || '')}">${esc(p.label)}</label>
-        <input type="number" data-algo="${esc(spec.id)}" data-param="${esc(p.name)}"
-               value="${esc(val)}" ${p.min != null ? `min="${p.min}"` : ''} ${p.step != null ? `step="${p.step}"` : (p.type === 'float' ? 'step="any"' : '')}>
+        <input type="number" data-ap="${esc(p.name)}" value="${esc(val)}"
+               ${p.min != null ? `min="${p.min}"` : ''} ${p.step != null ? `step="${p.step}"` : (p.type === 'float' ? 'step="any"' : '')}>
       </div>`;
     }).join('');
-    return `<div class="algo-block ${unsupported ? 'disabled' : ''}">
-      <div class="algo-head">
-        <label class="check">
-          <input type="checkbox" data-algo-toggle="${esc(spec.id)}" ${st.on && !unsupported ? 'checked' : ''} ${unsupported ? 'disabled' : ''}>
-          <span class="chip" style="${chipStyle(spec.id)}"></span>
-          <b>${esc(spec.label)}</b>
-        </label>
-        <span class="note">${unsupported ? `${spec.dims.join('/')}D only` : `supports ${spec.dims.join('/')}D`}</span>
+    addHTML = `<div class="add-form">
+      <div class="row">
+        <div class="field" style="min-width:260px">
+          <label>Algorithm</label>
+          <select id="add-algo-sel">
+            ${S.registry.map(r => `<option value="${esc(r.id)}" ${r.id === spec.id ? 'selected' : ''}>
+              ${esc(r.label)} (${r.dims === null ? 'any-D' : r.dims.join('/') + 'D'})</option>`).join('')}
+          </select>
+          ${supported ? '' : `<span class="hint" style="color:var(--status-critical)">not available for ${dims}D maps</span>`}
+        </div>
       </div>
-      ${st.on && !unsupported ? `<div class="algo-params">${paramsHTML}</div>` : ''}
+      <div class="algo-params">${paramsHTML}</div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn btn-primary btn-sm" id="add-confirm" ${supported ? '' : 'disabled'}>
+          ${F.addForm.editIndex != null ? 'Save changes' : 'Add to run'}</button>
+        <button class="btn btn-sm" id="add-cancel">Cancel</button>
+      </div>
     </div>`;
-  }).join('');
+  }
 
-  $$('[data-algo-toggle]', box).forEach(inp => inp.addEventListener('change', () => {
-    F.algos[inp.dataset.algoToggle].on = inp.checked;
-    renderAlgoBlocks();
+  box.innerHTML = `<div class="algo-inst-list">${listHTML}</div><div style="margin-top:10px">${addHTML}</div>`;
+
+  $$('[data-del-inst]', box).forEach(b => b.addEventListener('click', () => {
+    F.algoList.splice(Number(b.dataset.delInst), 1);
+    renderAlgoBuilder();
   }));
-  $$('[data-algo][data-param]', box).forEach(inp => inp.addEventListener('change', () => {
-    const st = F.algos[inp.dataset.algo];
-    st.params[inp.dataset.param] = inp.type === 'checkbox' ? inp.checked : Number(inp.value);
+  $$('[data-edit-inst]', box).forEach(b => b.addEventListener('click', () => {
+    const i = Number(b.dataset.editInst);
+    F.addForm = { id: F.algoList[i].id, params: { ...F.algoList[i].params }, editIndex: i };
+    renderAlgoBuilder();
   }));
+
+  const openAdd = $('#open-add', box);
+  if (openAdd) openAdd.addEventListener('click', () => {
+    const spec = S.registry[0];
+    F.addForm = { id: spec.id, params: defaultParams(spec), editIndex: null };
+    renderAlgoBuilder();
+  });
+
+  const sel = $('#add-algo-sel', box);
+  if (sel) {
+    sel.addEventListener('change', () => {
+      const spec = S.registry.find(r => r.id === sel.value);
+      F.addForm.id = spec.id;
+      F.addForm.params = defaultParams(spec);
+      renderAlgoBuilder();
+    });
+    $$('[data-ap]', box).forEach(inp => inp.addEventListener('change', () => {
+      F.addForm.params[inp.dataset.ap] = inp.type === 'checkbox' ? inp.checked : Number(inp.value);
+    }));
+    $('#add-confirm', box).addEventListener('click', () => {
+      const inst = { id: F.addForm.id, params: { ...F.addForm.params } };
+      if (F.addForm.editIndex != null) F.algoList[F.addForm.editIndex] = inst;
+      else F.algoList.push(inst);
+      F.addForm = null;
+      renderAlgoBuilder();
+    });
+    $('#add-cancel', box).addEventListener('click', () => { F.addForm = null; renderAlgoBuilder(); });
+  }
+}
+
+function defaultParams(spec) {
+  return Object.fromEntries(spec.params.map(p => [p.name, p.default]));
 }
 
 async function startRun() {
@@ -389,22 +499,35 @@ async function startRun() {
   msg.innerHTML = '';
   try {
     const dims = currentDims();
-    const algos = S.registry
-      .filter(spec => F.algos[spec.id] && F.algos[spec.id].on && (!dims || spec.dims.includes(dims)))
-      .map(spec => ({ id: spec.id, params: F.algos[spec.id].params }));
-    if (!algos.length) throw new Error('Select at least one algorithm.');
+    const algos = F.algoList.filter(inst => {
+      const spec = S.registry.find(r => r.id === inst.id);
+      return spec && specSupports(spec, dims);
+    });
+    if (!F.algoList.length) throw new Error('Add at least one algorithm.');
+    if (!algos.length) throw new Error(`None of the added algorithms support ${dims}D maps.`);
+    if (algos.length < F.algoList.length) {
+      throw new Error(`Some added algorithms do not support ${dims}D maps — remove them first.`);
+    }
 
+    // Metric hyperparameters are deliberately not set here — stored metrics use
+    // the defaults (θ=30, sweep=5) and are recomputable at any θ afterwards.
     const body = {
       name: F.runName || null,
       solve_timeout_s: F.timeout,
       algorithms: algos,
-      metric_params: {
-        steering_theta_degrees: F.theta ?? 30,
-        steering_sweep_range: F.sweep ?? 5,
-      },
     };
     if (F.source === 'new') {
-      body.new_map_set = { ...F.gen };
+      const g = { ...F.gen };
+      if (F.gen.mode === 'nd') {
+        g.shape = String(F.gen.shape).split(',').map(s => Number(s.trim())).filter(n => n > 0);
+        if (g.shape.length < 4) throw new Error('ND shape needs at least 4 sizes (use 2D/3D modes otherwise).');
+        g.dims = g.shape.length;
+      } else {
+        g.dims = Number(F.gen.mode);
+        delete g.shape;
+      }
+      delete g.mode;
+      body.new_map_set = g;
     } else {
       if (!F.mapSetId) throw new Error('Select a map set.');
       if (F.mapSel !== null && F.mapSel.size === 0) throw new Error('Select at least one map.');
@@ -443,22 +566,24 @@ function renderMapSets() {
       ? (ms.maps || []).slice(0, 6).map(m =>
           `<img loading="lazy" src="/api/map_sets/${esc(ms.id)}/thumb/${esc(m.stem)}.png" alt="" title="${esc(m.stem)} — start ${m.start} → end ${m.end}">`).join('') +
         ((ms.maps || []).length > 6 ? `<span class="more">+${ms.maps.length - 6} more</span>` : '')
-      : `<span class="more">3D set — no thumbnails</span>`;
+      : `<span class="more">${ms.dims}D set — no thumbnails</span>`;
+    const size = (ms.shape && ms.shape.length) ? ms.shape.join('×')
+      : `${ms.width}×${ms.height}${ms.dims === 3 ? '×' + ms.depth : ''}`;
     return `<div class="card ms-card">
       <div style="display:flex;align-items:center;gap:8px">
         <h2 style="margin:0">${esc(ms.name)}</h2>
         ${statusChip(ms.status)}
       </div>
       <div class="ms-meta">
-        ${ms.dims}D · ${(ms.maps || []).length}/${ms.num_maps} maps · ${ms.width}×${ms.height}${ms.dims === 3 ? '×' + ms.depth : ''}
-        · obstacles ${ms.gen_params.obstacles_min}–${ms.gen_params.obstacles_max}
+        ${ms.dims}D · ${(ms.maps || []).length}/${ms.num_maps} maps · ${size}
+        · obstacles ${ms.gen_params.obstacles_min ?? '?'}–${ms.gen_params.obstacles_max ?? '?'}
         ${ms.gen_params.seed != null ? `· seed ${ms.gen_params.seed}` : ''}<br>
         <span style="color:var(--muted)">${esc(ms.id)} · ${esc(ms.created)}</span>
       </div>
       <div class="ms-thumbs">${thumbs}</div>
       <div class="ms-actions">
         <button class="btn btn-sm" data-runon="${esc(ms.id)}" ${ms.status !== 'ready' ? 'disabled' : ''}>Run on this set</button>
-        ${ms.dims === 3 ? `<button class="btn btn-sm" data-view3d="${esc(ms.id)}" ${ms.status !== 'ready' ? 'disabled' : ''}>View maps</button>` : ''}
+        ${ms.dims >= 3 ? `<button class="btn btn-sm" data-view3d="${esc(ms.id)}" ${ms.status !== 'ready' ? 'disabled' : ''}>View maps</button>` : ''}
         <button class="btn btn-sm btn-danger" data-del="${esc(ms.id)}">Delete…</button>
       </div>
     </div>`;
@@ -553,7 +678,7 @@ function renderRunsList() {
   }
   root.innerHTML = `<div class="card">
     <h2>Runs</h2>
-    <table class="data">
+    <div style="overflow-x:auto"><table class="data">
       <thead><tr>
         <th>Name</th><th>Status</th><th>Created</th><th>Map set</th><th>Algorithms</th>
         <th class="num">Solved</th><th></th>
@@ -561,7 +686,7 @@ function renderRunsList() {
       <tbody>
         ${S.runs.map(r => {
           const algos = (r.algorithms || []).map(a =>
-            `<span class="algo-cell"><span class="chip" style="${chipStyle(a.id)}"></span>${esc(a.label)}</span>`).join('<br>');
+            `<span class="algo-cell" title="${esc(paramsSummary(a.params))}"><span class="chip" style="${chipStyle(a.id)}"></span>${esc(instLabel(r.algorithms, a))}</span>`).join('<br>');
           const solved = (r.summary || []).length
             ? r.summary.map(s => `${s.solved}/${s.total}`).join(' · ')
             : '—';
@@ -579,7 +704,7 @@ function renderRunsList() {
           </tr>`;
         }).join('')}
       </tbody>
-    </table>
+    </table></div>
   </div>`;
 
   $$('[data-open]', root).forEach(a => a.addEventListener('click', e => {
@@ -611,6 +736,33 @@ function meanBy(records, getter) {
   return vals.length ? vals.reduce((a, b) => a + Number(b), 0) / vals.length : null;
 }
 
+/* Fetch (and cache) recomputed steering penalties for a run at (theta, sweep).
+   Returns a Map: `${algorithm_key}|${map_stem}` -> steering value. */
+async function steeringAt(runDetail, theta, sweep) {
+  const saved = runDetail.metric_params || {};
+  const useSaved = Number(saved.steering_theta_degrees) === Number(theta)
+                && Number(saved.steering_sweep_range) === Number(sweep);
+  let results;
+  if (useSaved) {
+    results = runDetail.results || [];
+  } else {
+    const key = `${runDetail.id}|${theta}|${sweep}`;
+    if (!steerCache.has(key)) {
+      const out = await api(`/api/runs/${runDetail.id}/metrics`, {
+        method: 'POST',
+        body: JSON.stringify({ theta_degrees: theta, sweep_range: sweep, save: false }),
+      });
+      steerCache.set(key, out.results);
+    }
+    results = steerCache.get(key);
+  }
+  const map = new Map();
+  for (const r of results) {
+    if (r.metrics) map.set(`${recKey(r)}|${r.map_stem}`, r.metrics.steering_penalty);
+  }
+  return map;
+}
+
 function renderRunDetail() {
   const d = S.runDetail;
   const root = $('#tab-results');
@@ -619,8 +771,8 @@ function renderRunDetail() {
   const mp = previewOn ? LAB.preview.metric_params
                        : (d.metric_params || { steering_theta_degrees: 30, steering_sweep_range: 5 });
   const active = ['pending', 'running', 'cancelling'].includes(d.status);
+  const algos = d.algorithms || [];
 
-  // progress from matching background job
   let progressHTML = '';
   if (active) {
     const job = S.jobs.find(j => j.result && j.result.run_id === d.id);
@@ -634,15 +786,16 @@ function renderRunDetail() {
     </div>`;
   }
 
-  // ---- summary tiles ----
-  const tiles = (d.algorithms || []).map(a => {
-    const recs = results.filter(r => r.algorithm_id === a.id);
+  // ---- summary tiles (one per algorithm instance) ----
+  const tiles = algos.map(a => {
+    const key = algoKey(a);
+    const recs = results.filter(r => recKey(r) === key);
     const solved = recs.filter(r => r.solved);
     const mTime = meanBy(solved, r => r.time_s);
     const mPen = meanBy(solved, r => r.metrics && r.metrics.steering_penalty);
     const mLen = meanBy(solved, r => r.path_length_euclidean);
     return `<div class="tile">
-      <div class="t-head"><span class="chip" style="${chipStyle(a.id)}"></span>${esc(a.label)}</div>
+      <div class="t-head" title="${esc(paramsSummary(a.params))}"><span class="chip" style="${chipStyle(a.id)}"></span>${esc(instLabel(algos, a))}</div>
       <div class="t-stats">
         <span>solved <b>${solved.length}/${recs.length || '—'}</b></span>
         <span>mean time <b>${fmt(mTime, 3)}${mTime != null ? ' s' : ''}</b></span>
@@ -652,22 +805,6 @@ function renderRunDetail() {
     </div>`;
   }).join('');
 
-  // ---- comparison bars (single hue; direct value labels; lower = better) ----
-  const mo = METRIC_OPTIONS.find(m => m.key === compareMetric) || METRIC_OPTIONS[0];
-  const barData = (d.algorithms || []).map(a => {
-    const solved = results.filter(r => r.algorithm_id === a.id && r.solved);
-    const val = meanBy(solved, r => mo.src === 'metrics' ? (r.metrics && r.metrics[mo.key]) : r[mo.key]);
-    return { id: a.id, label: a.label, val };
-  }).filter(b => b.val != null);
-  const maxVal = Math.max(...barData.map(b => b.val), 0) || 1;
-  const barsHTML = barData
-    .sort((x, y) => x.val - y.val)
-    .map(b => `<div class="bar-row">
-      <div class="b-label"><span class="chip" style="${chipStyle(b.id)}"></span>${esc(b.label)}</div>
-      <div class="b-track"><div class="b-fill" style="width:${Math.max(2, 100 * b.val / maxVal)}%"></div></div>
-      <div class="b-val">${fmt(b.val, 3)}</div>
-    </div>`).join('');
-
   // ---- per-map table ----
   const rows = results.map((r, i) => {
     const pen = r.metrics ? r.metrics.steering_penalty : null;
@@ -675,9 +812,10 @@ function renderRunDetail() {
       ? Object.entries(r.metrics).map(([k, v]) =>
           `<div><span class="k">${esc(k)}</span><span class="v">${fmt(v, 5)}</span></div>`).join('')
       : '';
+    const entry = algos.find(a => algoKey(a) === recKey(r)) || { id: r.algorithm_id, label: r.algorithm_label, params: r.params };
     return `<tr>
       <td>${esc(r.map_stem || r.map_name)}</td>
-      <td><span class="algo-cell"><span class="chip" style="${chipStyle(r.algorithm_id)}"></span>${esc(r.algorithm_label)}</span></td>
+      <td><span class="algo-cell" title="${esc(paramsSummary(r.params))}"><span class="chip" style="${chipStyle(r.algorithm_id)}"></span>${esc(instLabel(algos, entry))}</span></td>
       <td>${r.solved ? '<span class="solved-yes">✓ solved</span>'
                      : `<span class="solved-no" title="${esc(r.error || '')}">✕ failed</span>`}</td>
       <td class="num">${fmt(r.time_s, 3)}</td>
@@ -699,13 +837,16 @@ function renderRunDetail() {
         <div class="img-map-block">
           <h4>${esc(stem)}</h4>
           <div class="img-row">
-            ${recs.map(r => `<figure>
-              <img loading="lazy" src="/api/runs/${esc(d.id)}/image/${esc(r.algorithm_id)}/${esc(stem)}_path.png" alt="">
-              <figcaption><span class="chip" style="${chipStyle(r.algorithm_id)}"></span>${esc(r.algorithm_label)}</figcaption>
-            </figure>`).join('')}
+            ${recs.map(r => {
+              const entry = algos.find(a => algoKey(a) === recKey(r)) || { id: r.algorithm_id, label: r.algorithm_label, params: r.params };
+              return `<figure>
+              <img loading="lazy" src="/api/runs/${esc(d.id)}/image/${esc(recKey(r))}/${esc(stem)}_path.png" alt="">
+              <figcaption><span class="chip" style="${chipStyle(r.algorithm_id)}"></span>${esc(instLabel(algos, entry))}</figcaption>
+            </figure>`;
+            }).join('')}
           </div>
         </div>`).join('')
-    : `<p class="empty">${d.dims === 3 ? 'No images for 3D runs.' : 'No path images (no solved maps yet).'}</p>`;
+    : `<p class="empty">${d.dims >= 3 ? 'No 2D images for ' + d.dims + 'D runs — use the path viewer above.' : 'No path images (no solved maps yet).'}</p>`;
 
   root.innerHTML = `
     <div class="card">
@@ -752,9 +893,9 @@ function renderRunDetail() {
       </p>
     </div>` : ''}
 
-    ${d.dims === 3 && results.some(r => r.solved) ? `
+    ${d.dims >= 3 && results.some(r => r.solved) ? `
     <div class="card">
-      <h2>3D path viewer</h2>
+      <h2>Path viewer (${d.dims}D)</h2>
       ${d.map_set_exists ? `
         <div class="row">
           <div class="field" style="min-width:240px">
@@ -767,10 +908,11 @@ function renderRunDetail() {
           <button class="btn" id="v3d-open">Open viewer</button>
         </div>
         <p class="hint" style="color:var(--muted);font-size:12px;margin:8px 0 0">
-          Slice-by-slice view plus a rotatable 3D view (drag to rotate, scroll to zoom) with each
-          algorithm's path overlaid.
+          ${d.dims === 3
+            ? 'Slice-by-slice view plus a rotatable 3D view (drag to rotate, scroll to zoom) with each algorithm’s path overlaid.'
+            : 'Coordinate-trace chart (each axis vs. step) plus a rotatable 3D projection of any three chosen dimensions.'}
         </p>`
-        : `<p class="empty">The map set was deleted — 3D view needs the map voxels and is unavailable.</p>`}
+        : `<p class="empty">The map set was deleted — the viewer needs the map voxels and is unavailable.</p>`}
     </div>` : ''}
 
     ${results.some(r => r.solved) ? `
@@ -783,8 +925,17 @@ function renderRunDetail() {
             ${METRIC_OPTIONS.map(m => `<option value="${m.key}" ${m.key === compareMetric ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}
           </select>
         </div>
+        ${(METRIC_OPTIONS.find(m => m.key === compareMetric) || {}).steer ? `
+        <div class="field">
+          <label>θ (°)</label>
+          <input type="number" id="cmp-theta" value="${STEER.theta}" min="0" max="180" step="5">
+        </div>
+        <div class="field">
+          <label>Sweep</label>
+          <input type="number" id="cmp-sweep" value="${STEER.sweep}" min="1" step="1">
+        </div>` : ''}
       </div>
-      <div class="bars">${barsHTML || '<p class="empty">No solved results to compare.</p>'}</div>
+      <div class="bars" id="detail-bars"><p class="empty">…</p></div>
       <div class="bar-note">Lower is better for all listed metrics.</div>
     </div>` : ''}
 
@@ -794,7 +945,7 @@ function renderRunDetail() {
         <thead><tr>
           <th>Map</th><th>Algorithm</th><th>Outcome</th>
           <th class="num">Time (s)</th><th class="num">Steps</th>
-          <th class="num">Length</th><th class="num">Steering pen.</th><th></th>
+          <th class="num">Length</th><th class="num">Steering pen. @${fmt(mp.steering_theta_degrees, 0)}°</th><th></th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table></div>` : '<p class="empty">No results yet.</p>'}
@@ -810,6 +961,11 @@ function renderRunDetail() {
   $('#rerun').addEventListener('click', () => prefillFromRun(d));
   const cmp = $('#cmp-metric');
   if (cmp) cmp.addEventListener('change', e => { compareMetric = e.target.value; renderRunDetail(); });
+  const cmpTheta = $('#cmp-theta');
+  if (cmpTheta) {
+    cmpTheta.addEventListener('change', e => { STEER.theta = Number(e.target.value); renderDetailBars(); });
+    $('#cmp-sweep').addEventListener('change', e => { STEER.sweep = Number(e.target.value); renderDetailBars(); });
+  }
   $$('[data-tgl]', root).forEach(b => b.addEventListener('click', () =>
     $(`#mrow-${b.dataset.tgl}`).classList.toggle('hidden')));
 
@@ -824,23 +980,57 @@ function renderRunDetail() {
     } catch (e) { alert(e.message); }
   });
 
-  // Metrics lab
-  const labTheta = $('#lab-theta'), labSweep = $('#lab-sweep');
+  const labTheta = $('#lab-theta');
   if (labTheta) {
     labTheta.addEventListener('input', e => { LAB.theta = Number(e.target.value); });
-    labSweep.addEventListener('input', e => { LAB.sweep = Number(e.target.value); });
+    $('#lab-sweep').addEventListener('input', e => { LAB.sweep = Number(e.target.value); });
     $('#lab-preview').addEventListener('click', () => labRecompute(d.id, false));
     $('#lab-save').addEventListener('click', () => labRecompute(d.id, true));
   }
   const labReset = $('#lab-reset');
   if (labReset) labReset.addEventListener('click', () => { LAB.preview = null; renderRunDetail(); });
 
-  // 3D viewer
   const v3dOpen = $('#v3d-open');
   if (v3dOpen) v3dOpen.addEventListener('click', () => {
-    const stem = $('#v3d-map').value;
-    openRunViewer(d, stem);
+    openRunViewer(d, $('#v3d-map').value);
   });
+
+  renderDetailBars();
+}
+
+/* Comparison bars in run detail — steering values honor the STEER θ/sweep. */
+async function renderDetailBars() {
+  const d = S.runDetail;
+  const box = $('#detail-bars');
+  if (!d || !box) return;
+  const previewOn = LAB.preview && LAB.runId === d.id;
+  const results = previewOn ? LAB.preview.results : (d.results || []);
+  const algos = d.algorithms || [];
+  const mo = METRIC_OPTIONS.find(m => m.key === compareMetric) || METRIC_OPTIONS[0];
+
+  let steerMap = null;
+  if (mo.steer) {
+    try { steerMap = await steeringAt(d, STEER.theta, STEER.sweep); }
+    catch (e) { box.innerHTML = `<p class="empty">${esc(e.message)}</p>`; return; }
+  }
+
+  const barData = algos.map(a => {
+    const key = algoKey(a);
+    const solved = results.filter(r => recKey(r) === key && r.solved);
+    const val = mo.steer
+      ? meanBy(solved, r => steerMap.get(`${key}|${r.map_stem}`))
+      : meanBy(solved, r => mo.src === 'metrics' ? (r.metrics && r.metrics[mo.key]) : r[mo.key]);
+    return { id: a.id, label: instLabel(algos, a), val };
+  }).filter(b => b.val != null);
+
+  const maxVal = Math.max(...barData.map(b => b.val), 0) || 1;
+  box.innerHTML = barData
+    .sort((x, y) => x.val - y.val)
+    .map(b => `<div class="bar-row">
+      <div class="b-label"><span class="chip" style="${chipStyle(b.id)}"></span>${esc(b.label)}</div>
+      <div class="b-track"><div class="b-fill" style="width:${Math.max(2, 100 * b.val / maxVal)}%"></div></div>
+      <div class="b-val">${fmt(b.val, 3)}</div>
+    </div>`).join('') || '<p class="empty">No solved results to compare.</p>';
 }
 
 async function labRecompute(runId, save) {
@@ -849,10 +1039,11 @@ async function labRecompute(runId, save) {
       method: 'POST',
       body: JSON.stringify({ theta_degrees: LAB.theta, sweep_range: LAB.sweep, save }),
     });
-    CMP.cache.delete(runId);   // compare tab must refetch updated metrics
+    CMP.cache.delete(runId);
+    for (const k of [...steerCache.keys()]) if (k.startsWith(runId + '|')) steerCache.delete(k);
     if (save) {
       LAB.preview = null;
-      await openRun(runId, true);   // reload saved state
+      await openRun(runId, true);
     } else {
       LAB.preview = out;
       LAB.runId = runId;
@@ -867,16 +1058,10 @@ function prefillFromRun(d) {
   F.mapSel = null;
   const ms = S.mapSets.find(m => m.id === d.map_set_id);
   if (ms && d.map_names && d.map_names.length < ms.maps.length) F.mapSel = new Set(d.map_names);
-  S.registry.forEach(spec => {
-    const cfg = (d.algorithms || []).find(a => a.id === spec.id);
-    F.algos[spec.id] = cfg
-      ? { on: true, params: { ...cfg.params } }
-      : { on: false, params: Object.fromEntries(spec.params.map(p => [p.name, p.default])) };
-  });
+  F.algoList = (d.algorithms || []).map(a => ({ id: a.id, params: { ...a.params } }));
+  F.addForm = null;
   F.runName = d.name + ' (re-run)';
   F.timeout = d.solve_timeout_s || 120;
-  F.theta = (d.metric_params || {}).steering_theta_degrees ?? 30;
-  F.sweep = (d.metric_params || {}).steering_sweep_range ?? 5;
   switchTab('run');
 }
 
@@ -907,6 +1092,39 @@ async function deleteRunFlow(runId, fromDetail) {
 
 /* ===================== COMPARE TAB ===================== */
 
+/* Steering configs the user wants to compare simultaneously — each becomes its
+   own metric/axis (e.g. put "@20°" on X and "@30°" on Y to compare them). */
+CMP.steerConfigs = [{ theta: 30, sweep: 5 }];
+
+function steerKey(c) { return `steer|${c.theta}|${c.sweep}`; }
+function steerOptions() {
+  return CMP.steerConfigs.map(c => ({
+    key: steerKey(c), label: `Steering penalty @${c.theta}° (sweep ${c.sweep})`, steer: c,
+  }));
+}
+
+const BASE_VAL_OPTIONS = [
+  { key: 'mean_time_s', label: 'Mean solve time (s)' },
+  { key: 'path_length_euclidean', label: 'Mean path length' },
+  { key: 'path_steps', label: 'Mean path steps' },
+  { key: 'pathbench', label: 'PathBench smoothness', metric: true },
+  { key: 'angle_change', label: 'Angle change / length', metric: true },
+  { key: 'discrete', label: 'Discrete curvature²', metric: true },
+  { key: 'deriv_v1_total', label: 'Derivative total (v1)', metric: true },
+  { key: 'deriv_v2_total', label: 'Derivative total (v2)', metric: true },
+  { key: 'solved_rate', label: 'Solved rate' },
+];
+
+/* Run-level (per map set) properties — useful as line-graph X axes. */
+const RUN_PROP_OPTIONS = [
+  { key: 'map_max_side', label: 'Map size (largest side)' },
+  { key: 'map_cells', label: 'Map total cells' },
+  { key: 'dims', label: 'Map dimensionality' },
+];
+
+function cmpMetricOptions() { return [...steerOptions(), ...BASE_VAL_OPTIONS]; }
+function axisOptions() { return [...steerOptions(), ...BASE_VAL_OPTIONS, ...RUN_PROP_OPTIONS]; }
+
 async function renderCompareTab() {
   const root = $('#tab-compare');
   const eligible = S.runs.filter(r =>
@@ -916,7 +1134,6 @@ async function renderCompareTab() {
     root.innerHTML = `<div class="card"><p class="empty">No completed runs to compare yet.</p></div>`;
     return;
   }
-  // Drop selections for runs that no longer exist.
   [...CMP.sel].forEach(id => { if (!eligible.find(r => r.id === id)) CMP.sel.delete(id); });
 
   root.innerHTML = `
@@ -929,7 +1146,7 @@ async function renderCompareTab() {
             <b>${esc(r.name)}</b>
             <span style="color:var(--muted);font-size:12px">
               ${esc(r.created)} · ${esc(r.map_set_name || '?')} · ${r.dims ? r.dims + 'D' : ''}
-              · ${(r.algorithms || []).map(a => a.label).join(', ')}
+              · ${(r.algorithms || []).map(a => instLabel(r.algorithms, a)).join(', ')}
             </span>
           </label>`).join('')}
       </div>
@@ -943,15 +1160,7 @@ async function renderCompareTab() {
   renderCompareBody();
 }
 
-async function renderCompareBody() {
-  const body = $('#cmp-body');
-  if (!body) return;
-  if (CMP.sel.size < 1) {
-    body.innerHTML = `<div class="card"><p class="empty">Select at least one run above.</p></div>`;
-    return;
-  }
-  body.innerHTML = `<div class="card"><p class="empty">Loading…</p></div>`;
-
+async function compareRows() {
   const details = [];
   for (const id of CMP.sel) {
     if (!CMP.cache.has(id)) {
@@ -961,87 +1170,529 @@ async function renderCompareBody() {
     details.push(CMP.cache.get(id));
   }
 
-  const mo = METRIC_OPTIONS.find(m => m.key === CMP.metric) || METRIC_OPTIONS[0];
   const rows = [];
   for (const d of details) {
+    // One steering map per configured (θ, sweep).
+    const steerMaps = {};
+    for (const c of CMP.steerConfigs) {
+      try { steerMaps[steerKey(c)] = await steeringAt(d, c.theta, c.sweep); }
+      catch (e) { steerMaps[steerKey(c)] = null; }
+    }
+    // Map-set geometry (for line graphs vs map size); may be deleted → null.
+    const ms = S.mapSets.find(m => m.id === d.map_set_id);
+    const shape = ms && ms.shape && ms.shape.length ? ms.shape
+      : (ms && ms.width ? [ms.width, ms.height, ...(ms.dims === 3 ? [ms.depth] : [])] : null);
+    const mapMaxSide = shape ? Math.max(...shape) : null;
+    const mapCells = shape ? shape.reduce((a, b) => a * b, 1) : null;
+
     for (const a of (d.algorithms || [])) {
-      const recs = (d.results || []).filter(r => r.algorithm_id === a.id);
+      const key = algoKey(a);
+      const recs = (d.results || []).filter(r => recKey(r) === key);
       const solved = recs.filter(r => r.solved);
+      const vals = {
+        mean_time_s: meanBy(solved, r => r.time_s),
+        path_length_euclidean: meanBy(solved, r => r.path_length_euclidean),
+        path_steps: meanBy(solved, r => r.path_steps),
+        dims: d.dims,
+        map_max_side: mapMaxSide,
+        map_cells: mapCells,
+        solved_rate: recs.length ? solved.length / recs.length : null,
+      };
+      for (const c of CMP.steerConfigs) {
+        const sk = steerKey(c);
+        vals[sk] = steerMaps[sk]
+          ? meanBy(solved, r => steerMaps[sk].get(`${key}|${r.map_stem}`)) : null;
+      }
+      for (const mo of BASE_VAL_OPTIONS.filter(o => o.metric)) {
+        vals[mo.key] = meanBy(solved, r => r.metrics && r.metrics[mo.key]);
+      }
       rows.push({
-        runId: d.id, runName: d.name, algoId: a.id, algoLabel: a.label,
+        runId: d.id, runName: d.name, algoId: a.id, algoKey: key,
+        algoLabel: instLabel(d.algorithms, a),
         params: a.params, mapSet: d.map_set_name || d.map_set_id, dims: d.dims,
-        theta: (d.metric_params || {}).steering_theta_degrees ?? 30,
-        total: recs.length, solved: solved.length,
-        meanTime: meanBy(solved, r => r.time_s),
-        val: meanBy(solved, r => mo.src === 'metrics' ? (r.metrics && r.metrics[mo.key]) : r[mo.key]),
+        total: recs.length, solved: solved.length, vals,
       });
     }
   }
+  return { rows, details };
+}
+
+async function renderCompareBody() {
+  const body = $('#cmp-body');
+  if (!body) return;
+  if (CMP.sel.size < 1) {
+    body.innerHTML = `<div class="card"><p class="empty">Select at least one run above.</p></div>`;
+    return;
+  }
+  body.innerHTML = `<div class="card"><p class="empty">Loading…</p></div>`;
+
+  const { rows, details } = await compareRows();
+  const metricOpts = cmpMetricOptions();
+  if (!metricOpts.find(m => m.key === CMP.metric)) CMP.metric = metricOpts[0].key;
+  const mo = metricOpts.find(m => m.key === CMP.metric);
+  const barKey = mo.key;
 
   const mapSets = [...new Set(details.map(d => d.map_set_id))];
-  const thetas = [...new Set(rows.map(r => r.theta))];
   const warns = [];
   if (mapSets.length > 1) warns.push('These runs used different map sets — metric differences may come from the maps, not the algorithms.');
-  if (mo.src === 'metrics' && thetas.length > 1) warns.push(`Runs were scored with different steering θ (${thetas.join('°, ')}°) — use each run's Metrics lab to align them before comparing steering penalty.`);
 
-  const withVal = rows.filter(r => r.val != null);
-  const maxVal = Math.max(...withVal.map(r => r.val), 0) || 1;
+  const withVal = rows.filter(r => r.vals[barKey] != null);
+  const maxVal = Math.max(...withVal.map(r => r.vals[barKey]), 0) || 1;
   const barsHTML = withVal
-    .sort((x, y) => x.val - y.val)
+    .slice().sort((x, y) => x.vals[barKey] - y.vals[barKey])
     .map(r => `<div class="bar-row">
-      <div class="b-label" title="${esc(JSON.stringify(r.params))}">
+      <div class="b-label" title="${esc(paramsSummary(r.params))}">
         <span class="chip" style="${chipStyle(r.algoId)}"></span>
         <span>${esc(r.runName)} · ${esc(r.algoLabel)}</span>
       </div>
-      <div class="b-track"><div class="b-fill" style="width:${Math.max(2, 100 * r.val / maxVal)}%"></div></div>
-      <div class="b-val">${fmt(r.val, 3)}</div>
+      <div class="b-track"><div class="b-fill" style="width:${Math.max(2, 100 * r.vals[barKey] / maxVal)}%"></div></div>
+      <div class="b-val">${fmt(r.vals[barKey], 3)}</div>
     </div>`).join('');
+
+  // Steering-config chips (each is a metric/axis of its own).
+  const steerChipsHTML = CMP.steerConfigs.map((c, i) => `
+    <span class="steer-chip">θ=${c.theta}° · sweep ${c.sweep}
+      ${CMP.steerConfigs.length > 1 ? `<button data-del-steer="${i}" title="remove">×</button>` : ''}
+    </span>`).join('');
+
+  const isLine = CMP.graph.mode === 'line';
+  const xOpts = isLine ? RUN_PROP_OPTIONS : axisOptions();
+  const axisSel = (id, current, opts) => `<select id="${id}">
+      ${opts.map(o => `<option value="${o.key}" ${o.key === current ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+    </select>`;
+  if (!xOpts.find(o => o.key === CMP.graph.x)) CMP.graph.x = xOpts[0].key;
+  if (!axisOptions().find(o => o.key === CMP.graph.y)) CMP.graph.y = axisOptions()[0].key;
+
+  // Details table shows every configured steering column.
+  const steerCols = steerOptions();
 
   body.innerHTML = `
     <div class="card">
       <h2>Comparison</h2>
       ${warns.map(w => `<div class="cmp-note">${esc(w)}</div>`).join('')}
+
+      <h3 style="margin-top:0">Smoothness hyperparameters</h3>
+      <div class="row" style="align-items:center">
+        <div class="steer-chips">${steerChipsHTML}</div>
+        <div class="field"><label>θ (°)</label><input type="number" id="steer-new-theta" value="20" min="0" max="180" step="5" style="width:80px"></div>
+        <div class="field"><label>Sweep</label><input type="number" id="steer-new-sweep" value="5" min="1" step="1" style="width:70px"></div>
+        <button class="btn btn-sm" id="steer-add">+ Add steering config</button>
+      </div>
+      <p class="hint" style="color:var(--muted);font-size:12px;margin:6px 0 12px">
+        Each config becomes its own metric — selectable below and usable as any graph axis
+        (e.g. X = @20°, Y = @30°). All are recomputed from stored paths; no planner re-runs.
+      </p>
+
       <div class="row">
-        <div class="field" style="min-width:280px">
+        <div class="field" style="min-width:300px">
           <label>Metric (mean over solved maps)</label>
           <select id="cmp-tab-metric">
-            ${METRIC_OPTIONS.map(m => `<option value="${m.key}" ${m.key === CMP.metric ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}
+            ${metricOpts.map(m => `<option value="${m.key}" ${m.key === CMP.metric ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}
           </select>
         </div>
+        <a class="btn btn-sm" style="align-self:flex-end"
+           href="/api/compare/results.csv?runs=${[...CMP.sel].join(',')}">Download raw CSV (selected runs)</a>
       </div>
       <div class="bars">${barsHTML || '<p class="empty">No solved results among selected runs.</p>'}</div>
       <div class="bar-note">Lower is better for all listed metrics.</div>
+
+      <h3>Metric graph</h3>
+      <div class="row">
+        <div class="field"><label>Chart</label>
+          <select id="gx-mode">
+            <option value="scatter" ${!isLine ? 'selected' : ''}>Scatter (2D / 3D)</option>
+            <option value="line" ${isLine ? 'selected' : ''}>Lines vs map property</option>
+          </select>
+        </div>
+        <div class="field" style="min-width:210px"><label>X axis</label>${axisSel('gx-x', CMP.graph.x, xOpts)}</div>
+        <div class="field" style="min-width:210px"><label>Y axis</label>${axisSel('gx-y', CMP.graph.y, axisOptions())}</div>
+        ${!isLine ? `<div class="field" style="min-width:210px"><label>Z axis (optional)</label>
+          ${axisSel('gx-z', CMP.graph.z, [{ key: 'none', label: '— none (2D chart) —' }, ...axisOptions()])}</div>` : ''}
+        <button class="btn btn-sm" id="graph-png">Download PNG</button>
+      </div>
+      <div class="graph-wrap">
+        <canvas id="cmp-graph" width="920" height="560"></canvas>
+        <div class="graph-legend" id="graph-legend"></div>
+      </div>
+      <div class="bar-note" id="graph-hint"></div>
+
       <h3>Details</h3>
       <div style="overflow-x:auto"><table class="data">
         <thead><tr>
-          <th>Run</th><th>Algorithm</th><th>Params</th><th>Map set</th>
-          <th class="num">Solved</th><th class="num">Mean time (s)</th><th class="num">${esc(mo.label)}</th>
+          <th>Run</th><th>Algorithm (hyperparameters)</th><th>Map set</th>
+          <th class="num">Solved</th><th class="num">Mean time (s)</th>
+          ${steerCols.map(c => `<th class="num">${esc(c.label)}</th>`).join('')}
         </tr></thead>
         <tbody>
           ${rows.map(r => `<tr>
             <td><a class="plain" href="#" data-goto="${esc(r.runId)}">${esc(r.runName)}</a></td>
             <td><span class="algo-cell"><span class="chip" style="${chipStyle(r.algoId)}"></span>${esc(r.algoLabel)}</span></td>
-            <td style="font-size:11.5px;color:var(--ink-2)">${esc(Object.entries(r.params || {}).map(([k, v]) => `${k}=${v}`).join(', '))}</td>
             <td>${esc(r.mapSet)} (${r.dims}D)</td>
             <td class="num">${r.solved}/${r.total}</td>
-            <td class="num">${fmt(r.meanTime, 3)}</td>
-            <td class="num">${fmt(r.val, 3)}</td>
+            <td class="num">${fmt(r.vals.mean_time_s, 3)}</td>
+            ${steerCols.map(c => `<td class="num">${fmt(r.vals[c.key], 2)}</td>`).join('')}
           </tr>`).join('')}
         </tbody>
       </table></div>
     </div>`;
 
   $('#cmp-tab-metric').addEventListener('change', e => { CMP.metric = e.target.value; renderCompareBody(); });
+  $('#steer-add').addEventListener('click', () => {
+    const theta = Number($('#steer-new-theta').value);
+    const sweep = Number($('#steer-new-sweep').value);
+    if (!CMP.steerConfigs.find(c => c.theta === theta && c.sweep === sweep)) {
+      CMP.steerConfigs.push({ theta, sweep });
+      renderCompareBody();
+    }
+  });
+  $$('[data-del-steer]', body).forEach(b => b.addEventListener('click', () => {
+    CMP.steerConfigs.splice(Number(b.dataset.delSteer), 1);
+    renderCompareBody();
+  }));
   $$('[data-goto]', body).forEach(a => a.addEventListener('click', e => {
     e.preventDefault(); switchTab('results'); openRun(a.dataset.goto);
   }));
+  $('#gx-mode').addEventListener('change', e => { CMP.graph.mode = e.target.value; renderCompareBody(); });
+  ['gx-x', 'gx-y', 'gx-z'].forEach((id, i) => {
+    const el = $(`#${id}`);
+    if (el) el.addEventListener('change', e => {
+      CMP.graph[['x', 'y', 'z'][i]] = e.target.value;
+      drawCompareGraph(rows);
+    });
+  });
+  $('#graph-png').addEventListener('click', () => {
+    const a = document.createElement('a');
+    a.href = $('#cmp-graph').toDataURL('image/png');
+    a.download = 'metric_graph.png';
+    a.click();
+  });
+
+  drawCompareGraph(rows);
 }
 
-/* ===================== 3D VIEWER ===================== */
+/* ---- metric graph: 2D scatter or rotatable 3D scatter, canvas-rendered ---- */
 
-function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const GVIEW = { yaw: 0.7, pitch: 0.45, zoom: 1.0, bound: false };
+
+function axisLabel(key) {
+  const o = axisOptions().find(o => o.key === key);
+  return o ? o.label : key;
 }
+
+function slotStyleByIndex(i) {
+  return `background: var(--cat-${i % 8 + 1})`;
+}
+function slotHexByIndex(i) {
+  return cssVar(`--cat-${i % 8 + 1}`) || '#2a78d6';
+}
+
+function niceTicks(min, max, n = 5) {
+  if (!(max > min)) { max = min + 1; }
+  const span = max - min;
+  const step = Math.pow(10, Math.floor(Math.log10(span / n)));
+  const err = span / n / step;
+  const mult = err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1;
+  const s = mult * step;
+  const ticks = [];
+  for (let v = Math.ceil(min / s) * s; v <= max + 1e-9; v += s) ticks.push(v);
+  return ticks;
+}
+
+function drawCompareGraph(rows) {
+  const cv = $('#cmp-graph');
+  if (!cv) return;
+  if (CMP.graph.mode === 'line') { drawLineGraph(rows, cv); return; }
+  const ctx = cv.getContext('2d');
+  const xs = CMP.graph.x, ys = CMP.graph.y, zs = CMP.graph.z;
+  const is3d = zs !== 'none';
+
+  const pts = rows
+    .map(r => ({
+      x: r.vals[xs], y: r.vals[ys], z: is3d ? r.vals[zs] : 0,
+      label: `${r.runName} · ${r.algoLabel}`,
+      algoId: r.algoId,
+    }))
+    .filter(p => p.x != null && p.y != null && (!is3d || p.z != null));
+
+  const legend = $('#graph-legend');
+  const algosPresent = [...new Set(pts.map(p => p.algoId))];
+  legend.innerHTML = algosPresent.map(id => {
+    const spec = S.registry.find(r => r.id === id);
+    return `<span class="algo-cell"><span class="chip" style="${chipStyle(id)}"></span>${esc(spec ? spec.label : id)}</span>`;
+  }).join('');
+
+  $('#graph-hint').textContent = is3d
+    ? 'Each point is one run × algorithm instance. Drag to rotate, scroll to zoom. Axes are normalized; labels show real values.'
+    : 'Each point is one run × algorithm instance.';
+
+  const surface = cssVar('--surface'), ink = cssVar('--ink'), ink2 = cssVar('--ink-2'),
+        muted = cssVar('--muted'), grid = cssVar('--grid'), baseline = cssVar('--baseline');
+
+  ctx.fillStyle = surface;
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.font = '12px system-ui, sans-serif';
+
+  if (!pts.length) {
+    ctx.fillStyle = muted;
+    ctx.fillText('No data points for the chosen axes.', 30, 40);
+    return;
+  }
+
+  const range = arr => {
+    let mn = Math.min(...arr), mx = Math.max(...arr);
+    if (mn === mx) { mn -= 1; mx += 1; }
+    const pad = (mx - mn) * 0.08;
+    return [mn - pad, mx + pad];
+  };
+
+  if (!is3d) {
+    const M = { l: 70, r: 24, t: 20, b: 52 };
+    const W = cv.width - M.l - M.r, H = cv.height - M.t - M.b;
+    const [xmin, xmax] = range(pts.map(p => p.x));
+    const [ymin, ymax] = range(pts.map(p => p.y));
+    const px = v => M.l + (v - xmin) / (xmax - xmin) * W;
+    const py = v => M.t + H - (v - ymin) / (ymax - ymin) * H;
+
+    ctx.strokeStyle = grid;
+    ctx.lineWidth = 1;
+    ctx.fillStyle = muted;
+    for (const t of niceTicks(xmin, xmax)) {
+      ctx.beginPath(); ctx.moveTo(px(t), M.t); ctx.lineTo(px(t), M.t + H); ctx.stroke();
+      ctx.textAlign = 'center';
+      ctx.fillText(fmt(t, 2), px(t), M.t + H + 18);
+    }
+    for (const t of niceTicks(ymin, ymax)) {
+      ctx.beginPath(); ctx.moveTo(M.l, py(t)); ctx.lineTo(M.l + W, py(t)); ctx.stroke();
+      ctx.textAlign = 'right';
+      ctx.fillText(fmt(t, 2), M.l - 8, py(t) + 4);
+    }
+    ctx.strokeStyle = baseline;
+    ctx.strokeRect(M.l, M.t, W, H);
+
+    ctx.fillStyle = ink2;
+    ctx.textAlign = 'center';
+    ctx.fillText(axisLabel(xs), M.l + W / 2, cv.height - 12);
+    ctx.save();
+    ctx.translate(16, M.t + H / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(axisLabel(ys), 0, 0);
+    ctx.restore();
+
+    for (const p of pts) {
+      ctx.fillStyle = chipHex(p.algoId);
+      ctx.beginPath();
+      ctx.arc(px(p.x), py(p.y), 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = surface;    // 2px surface ring separates overlapping marks
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = ink;
+      ctx.textAlign = 'left';
+      ctx.fillText(p.label, px(p.x) + 10, py(p.y) + 4);
+    }
+    return;
+  }
+
+  // ---- 3D scatter: normalize each axis to a unit cube, rotate/zoom ----
+  const [xmin, xmax] = range(pts.map(p => p.x));
+  const [ymin, ymax] = range(pts.map(p => p.y));
+  const [zmin, zmax] = range(pts.map(p => p.z));
+  const norm = (v, mn, mx) => (v - mn) / (mx - mn) - 0.5;
+
+  const scale = GVIEW.zoom * Math.min(cv.width, cv.height) * 0.52;
+  const project = (nx, ny, nz) => {
+    const x1 = nx * Math.cos(GVIEW.yaw) - ny * Math.sin(GVIEW.yaw);
+    const y1 = nx * Math.sin(GVIEW.yaw) + ny * Math.cos(GVIEW.yaw);
+    const y2 = y1 * Math.cos(GVIEW.pitch) - nz * Math.sin(GVIEW.pitch);
+    const z2 = y1 * Math.sin(GVIEW.pitch) + nz * Math.cos(GVIEW.pitch);
+    return [x1 * scale + cv.width / 2, -z2 * scale + cv.height / 2, y2];
+  };
+
+  // cube edges
+  const c = [-0.5, 0.5];
+  const corners = [];
+  for (const a of c) for (const b of c) for (const d of c) corners.push([a, b, d]);
+  const pc = corners.map(k => project(k[0], k[1], k[2]));
+  const edges = [];
+  for (let i = 0; i < 8; i++) for (let j = i + 1; j < 8; j++) {
+    const diff = corners[i].filter((v, k) => v !== corners[j][k]).length;
+    if (diff === 1) edges.push([i, j]);
+  }
+  ctx.strokeStyle = grid;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const [a, b] of edges) { ctx.moveTo(pc[a][0], pc[a][1]); ctx.lineTo(pc[b][0], pc[b][1]); }
+  ctx.stroke();
+
+  // axis labels + min/max value labels at ends
+  const axes = [
+    { label: axisLabel(xs), from: [-0.5, -0.5, -0.5], to: [0.5, -0.5, -0.5], mn: xmin, mx: xmax },
+    { label: axisLabel(ys), from: [-0.5, -0.5, -0.5], to: [-0.5, 0.5, -0.5], mn: ymin, mx: ymax },
+    { label: axisLabel(zs), from: [-0.5, -0.5, -0.5], to: [-0.5, -0.5, 0.5], mn: zmin, mx: zmax },
+  ];
+  ctx.fillStyle = ink2;
+  ctx.textAlign = 'center';
+  for (const ax of axes) {
+    const a = project(...ax.from), b = project(...ax.to);
+    ctx.strokeStyle = baseline;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    ctx.fillStyle = ink2;
+    ctx.fillText(ax.label, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 8);
+    ctx.fillStyle = muted;
+    ctx.fillText(fmt(ax.mn, 2), a[0], a[1] + 14);
+    ctx.fillText(fmt(ax.mx, 2), b[0], b[1] + 14);
+  }
+
+  // points, far → near
+  const proj = pts.map(p => ({
+    ...p, s: project(norm(p.x, xmin, xmax), norm(p.y, ymin, ymax), norm(p.z, zmin, zmax)),
+  })).sort((a, b) => b.s[2] - a.s[2]);
+  for (const p of proj) {
+    ctx.fillStyle = chipHex(p.algoId);
+    ctx.beginPath();
+    ctx.arc(p.s[0], p.s[1], 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = surface;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = ink;
+    ctx.textAlign = 'left';
+    ctx.fillText(p.label, p.s[0] + 10, p.s[1] + 4);
+  }
+
+  // bind rotate/zoom once
+  if (!GVIEW.bound || cv.dataset.bound !== '1') {
+    cv.dataset.bound = '1';
+    let dragging = false, lx = 0, ly = 0;
+    cv.addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
+    cv.addEventListener('pointermove', e => {
+      if (!dragging || CMP.graph.z === 'none') return;
+      GVIEW.yaw += (e.clientX - lx) * 0.01;
+      GVIEW.pitch = Math.max(-1.45, Math.min(1.45, GVIEW.pitch + (e.clientY - ly) * 0.01));
+      lx = e.clientX; ly = e.clientY;
+      drawCompareGraph(rows);
+    });
+    cv.addEventListener('pointerup', () => { dragging = false; });
+    cv.addEventListener('wheel', e => {
+      if (CMP.graph.z === 'none') return;
+      e.preventDefault();
+      GVIEW.zoom = Math.max(0.4, Math.min(3, GVIEW.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+      drawCompareGraph(rows);
+    }, { passive: false });
+  }
+}
+
+/* Line graph: Y metric vs a run-level map property; one line per algorithm
+   configuration (same algorithm id + identical params grouped across runs).
+   Multiple runs at the same X are averaged. */
+function drawLineGraph(rows, cv) {
+  const ctx = cv.getContext('2d');
+  const xs = CMP.graph.x, ys = CMP.graph.y;
+  const surface = cssVar('--surface'), ink = cssVar('--ink'), ink2 = cssVar('--ink-2'),
+        muted = cssVar('--muted'), grid = cssVar('--grid'), baseline = cssVar('--baseline');
+
+  ctx.fillStyle = surface;
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.font = '12px system-ui, sans-serif';
+
+  // Group rows into series by algorithm configuration.
+  const series = new Map();
+  for (const r of rows) {
+    const x = r.vals[xs], y = r.vals[ys];
+    if (x == null || y == null) continue;
+    const sig = r.algoId + '|' + JSON.stringify(r.params || {});
+    if (!series.has(sig)) series.set(sig, { label: r.algoLabel, algoId: r.algoId, byX: new Map() });
+    const s = series.get(sig);
+    if (!s.byX.has(x)) s.byX.set(x, []);
+    s.byX.get(x).push(y);
+  }
+  const lines = [...series.values()].map((s, i) => ({
+    ...s, idx: i,
+    pts: [...s.byX.entries()]
+      .map(([x, ys2]) => ({ x, y: ys2.reduce((a, b) => a + b, 0) / ys2.length, n: ys2.length }))
+      .sort((a, b) => a.x - b.x),
+  }));
+
+  const legend = $('#graph-legend');
+  legend.innerHTML = lines.map(l =>
+    `<span class="algo-cell"><span class="chip" style="${slotStyleByIndex(l.idx)}"></span>${esc(l.label)}</span>`).join('');
+  $('#graph-hint').textContent =
+    'One line per algorithm configuration, across the selected runs. Points at the same X are averaged.';
+
+  if (!lines.length) {
+    ctx.fillStyle = muted;
+    ctx.fillText('No data points — the selected runs have no values for these axes.', 30, 40);
+    return;
+  }
+
+  const allX = lines.flatMap(l => l.pts.map(p => p.x));
+  const allY = lines.flatMap(l => l.pts.map(p => p.y));
+  const pad = (mn, mx) => { if (mn === mx) { mn -= 1; mx += 1; } const p = (mx - mn) * 0.08; return [mn - p, mx + p]; };
+  const [xmin, xmax] = pad(Math.min(...allX), Math.max(...allX));
+  const [ymin, ymax] = pad(Math.min(...allY), Math.max(...allY));
+
+  const M = { l: 70, r: 190, t: 20, b: 52 };   // wide right margin for line-end labels
+  const W = cv.width - M.l - M.r, H = cv.height - M.t - M.b;
+  const px = v => M.l + (v - xmin) / (xmax - xmin) * W;
+  const py = v => M.t + H - (v - ymin) / (ymax - ymin) * H;
+
+  ctx.strokeStyle = grid;
+  ctx.lineWidth = 1;
+  ctx.fillStyle = muted;
+  for (const t of niceTicks(xmin, xmax)) {
+    ctx.beginPath(); ctx.moveTo(px(t), M.t); ctx.lineTo(px(t), M.t + H); ctx.stroke();
+    ctx.textAlign = 'center';
+    ctx.fillText(fmt(t, 2), px(t), M.t + H + 18);
+  }
+  for (const t of niceTicks(ymin, ymax)) {
+    ctx.beginPath(); ctx.moveTo(M.l, py(t)); ctx.lineTo(M.l + W, py(t)); ctx.stroke();
+    ctx.textAlign = 'right';
+    ctx.fillText(fmt(t, 2), M.l - 8, py(t) + 4);
+  }
+  ctx.strokeStyle = baseline;
+  ctx.strokeRect(M.l, M.t, W, H);
+
+  ctx.fillStyle = ink2;
+  ctx.textAlign = 'center';
+  ctx.fillText(axisLabel(xs), M.l + W / 2, cv.height - 12);
+  ctx.save();
+  ctx.translate(16, M.t + H / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(axisLabel(ys), 0, 0);
+  ctx.restore();
+
+  // Lines: 2px stroke, 8px markers with a 2px surface ring, label at line end.
+  const usedLabelYs = [];
+  for (const l of lines) {
+    const color = slotHexByIndex(l.idx);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    l.pts.forEach((p, i) => {
+      if (i === 0) ctx.moveTo(px(p.x), py(p.y)); else ctx.lineTo(px(p.x), py(p.y));
+    });
+    ctx.stroke();
+    for (const p of l.pts) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(px(p.x), py(p.y), 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = surface;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    const last = l.pts[l.pts.length - 1];
+    let ly = py(last.y) + 4;
+    while (usedLabelYs.some(u => Math.abs(u - ly) < 14)) ly += 14;   // avoid label collisions
+    usedLabelYs.push(ly);
+    ctx.fillStyle = ink;
+    ctx.textAlign = 'left';
+    ctx.fillText(l.label.slice(0, 34), px(last.x) + 10, ly);
+  }
+}
+
+/* ===================== VIEWERS (3D slice + rotatable, ND traces + projection) ===================== */
 
 async function loadGrid(msId, mapName) {
   const key = `${msId}/${mapName}`;
@@ -1050,12 +1701,11 @@ async function loadGrid(msId, mapName) {
     const bin = atob(g.data_b64);
     const data = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
-    GRIDS.set(key, { shape: g.shape, data });
+    GRIDS.set(key, { shape: g.shape, data });   // shape is grid-order (reversed)
   }
   return GRIDS.get(key);
 }
 
-/* Open the viewer for a run's map: overlays every solved algorithm path. */
 async function openRunViewer(d, stem) {
   const recs = (d.results || []).filter(r => r.map_stem === stem && r.solved);
   const ms = S.mapSets.find(m => m.id === d.map_set_id);
@@ -1063,17 +1713,18 @@ async function openRunViewer(d, stem) {
   const entry = (ms.maps || []).find(m => m.stem === stem);
   if (!entry) { alert('Map not found in map set.'); return; }
 
+  const algos = d.algorithms || [];
   const pathSpecs = [];
   for (const r of recs) {
     try {
-      const path = await api(`/api/runs/${d.id}/path/${r.algorithm_id}/${stem}`);
-      pathSpecs.push({ algoId: r.algorithm_id, label: r.algorithm_label, path });
+      const path = await api(`/api/runs/${d.id}/path/${recKey(r)}/${stem}`);
+      const e2 = algos.find(a => algoKey(a) === recKey(r)) || { id: r.algorithm_id, label: r.algorithm_label, params: r.params };
+      pathSpecs.push({ algoId: r.algorithm_id, key: recKey(r), label: instLabel(algos, e2), path });
     } catch (e) { /* no stored path */ }
   }
   openViewerModal(ms, entry, pathSpecs);
 }
 
-/* Modal wrapper: map selector (within the set) + slice pane + rotatable 3D pane. */
 function openViewerModal(ms, entry, pathSpecs) {
   pathSpecs = pathSpecs || [];
   entry = (entry && entry.stem) ? entry : (ms.maps || [])[0];
@@ -1110,26 +1761,37 @@ async function mountViewer(mount, ms, entry, pathSpecs) {
   try { grid = await loadGrid(ms.id, entry.name); }
   catch (e) { mount.innerHTML = `<p class="empty">Failed to load grid: ${esc(e.message)}</p>`; return; }
 
+  if (ms.dims === 3) mountViewer3D(mount, ms, entry, pathSpecs, grid);
+  else mountViewerND(mount, ms, entry, pathSpecs, grid);
+}
+
+/* ---- shared: toggles row ---- */
+function togglesHTML(pathSpecs) {
+  return pathSpecs.length ? `<div class="viewer-toggles">
+    ${pathSpecs.map(s => `<label class="check">
+      <input type="checkbox" data-vt="${esc(s.key || s.algoId)}" checked>
+      <span class="chip" style="${chipStyle(s.algoId)}"></span>${esc(s.label)}
+    </label>`).join('')}
+  </div>` : '';
+}
+
+/* ---- 3D viewer: slice pane + rotatable voxel pane ---- */
+function mountViewer3D(mount, ms, entry, pathSpecs, grid) {
   const [D, H, W] = grid.shape;
   const start = entry.start, end = entry.end;
-  const enabled = new Map(pathSpecs.map(s => [s.algoId, true]));
+  const enabled = new Map(pathSpecs.map(s => [s.key || s.algoId, true]));
 
   mount.innerHTML = `
-    ${pathSpecs.length ? `<div class="viewer-toggles">
-      ${pathSpecs.map(s => `<label class="check">
-        <input type="checkbox" data-vt="${esc(s.algoId)}" checked>
-        <span class="chip" style="${chipStyle(s.algoId)}"></span>${esc(s.label)}
-      </label>`).join('')}
-    </div>` : ''}
+    ${togglesHTML(pathSpecs)}
     <div class="viewer-grid">
       <div class="viewer-pane">
         <h4>Slice view (z-layer)</h4>
         <canvas id="v-slice"></canvas>
         <div class="v-controls">
-          <input type="range" id="v-z" min="0" max="${D - 1}" value="${Math.min(start[2] ?? 0, D - 1)}">
+          <input type="range" id="v-z" min="0" max="${D - 1}" value="${Math.min(Math.round(start[2] ?? 0), D - 1)}">
           <span id="v-zlabel" style="min-width:70px"></span>
         </div>
-        <span class="viewer-hint">Solid = path on this layer · faded = path within ±1 layer · green start · red end</span>
+        <span class="viewer-hint">Solid = path within ±0.5 layer · faded = within ±1.5 · green start · red end</span>
       </div>
       <div class="viewer-pane">
         <h4>3D view</h4>
@@ -1138,7 +1800,6 @@ async function mountViewer(mount, ms, entry, pathSpecs) {
       </div>
     </div>`;
 
-  /* ---- slice pane ---- */
   const sliceCv = $('#v-slice', mount);
   const cs = Math.max(2, Math.floor(Math.min(380 / W, 380 / H)));
   sliceCv.width = W * cs;
@@ -1162,115 +1823,27 @@ async function mountViewer(mount, ms, entry, pathSpecs) {
     }
     ctx.globalAlpha = 1;
     for (const s of pathSpecs) {
-      if (!enabled.get(s.algoId)) continue;
+      if (!enabled.get(s.key || s.algoId)) continue;
       const color = chipHex(s.algoId);
       for (const p of s.path) {
         const dz = Math.abs((p[2] ?? 0) - z);
-        if (dz > 1) continue;
-        ctx.globalAlpha = dz === 0 ? 1 : 0.3;
+        if (dz > 1.5) continue;
+        ctx.globalAlpha = dz <= 0.5 ? 1 : 0.3;
         ctx.fillStyle = color;
-        ctx.fillRect(p[0] * cs, p[1] * cs, cs, cs);
+        ctx.fillRect(Math.floor(p[0]) * cs, Math.floor(p[1]) * cs, cs, cs);
       }
     }
     ctx.globalAlpha = 1;
-    if ((start[2] ?? 0) === z) { ctx.fillStyle = '#0ca30c'; ctx.fillRect(start[0] * cs, start[1] * cs, cs, cs); }
-    if ((end[2] ?? 0) === z) { ctx.fillStyle = '#d03b3b'; ctx.fillRect(end[0] * cs, end[1] * cs, cs, cs); }
+    if (Math.round(start[2] ?? 0) === z) { ctx.fillStyle = '#0ca30c'; ctx.fillRect(start[0] * cs, start[1] * cs, cs, cs); }
+    if (Math.round(end[2] ?? 0) === z) { ctx.fillStyle = '#d03b3b'; ctx.fillRect(end[0] * cs, end[1] * cs, cs, cs); }
   }
   zInput.addEventListener('input', drawSlice);
 
-  /* ---- 3D pane ---- */
   const cv3 = $('#v-3d', mount);
-  const ctx3 = cv3.getContext('2d');
   const view = { yaw: 0.7, pitch: 0.45, zoom: 1.0 };
-  const cx = W / 2, cy = H / 2, cz = D / 2;
-  const maxDim = Math.max(W, H, D);
+  const draw3D = make3DVoxelRenderer(cv3, view, grid, [W, H, D], pathSpecs, enabled, start, end);
 
-  // Collect obstacle voxels once (subsample very dense grids for canvas perf).
-  let voxels = [];
-  for (let z = 0; z < D; z++) {
-    for (let y = 0; y < H; y++) {
-      const rowBase = z * H * W + y * W;
-      for (let x = 0; x < W; x++) if (grid.data[rowBase + x]) voxels.push([x, y, z]);
-    }
-  }
-  const MAX_VOX = 50000;
-  if (voxels.length > MAX_VOX) {
-    const stride = Math.ceil(voxels.length / MAX_VOX);
-    voxels = voxels.filter((_, i) => i % stride === 0);
-  }
-
-  function project(x, y, z) {
-    const s = view.zoom * (380 / maxDim);
-    const x1 = (x - cx) * Math.cos(view.yaw) - (y - cy) * Math.sin(view.yaw);
-    const y1 = (x - cx) * Math.sin(view.yaw) + (y - cy) * Math.cos(view.yaw);
-    const z1 = (z - cz);
-    const y2 = y1 * Math.cos(view.pitch) - z1 * Math.sin(view.pitch);
-    const z2 = y1 * Math.sin(view.pitch) + z1 * Math.cos(view.pitch);
-    return [x1 * s + cv3.width / 2, -z2 * s + cv3.height / 2, y2];
-  }
-
-  function draw3D() {
-    ctx3.fillStyle = cssVar('--page');
-    ctx3.fillRect(0, 0, cv3.width, cv3.height);
-
-    // bounding box wireframe
-    const corners = [[0, 0, 0], [W, 0, 0], [W, H, 0], [0, H, 0], [0, 0, D], [W, 0, D], [W, H, D], [0, H, D]];
-    const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
-    const pc = corners.map(c => project(c[0], c[1], c[2]));
-    ctx3.strokeStyle = cssVar('--baseline');
-    ctx3.lineWidth = 1;
-    ctx3.beginPath();
-    for (const [a, b] of edges) { ctx3.moveTo(pc[a][0], pc[a][1]); ctx3.lineTo(pc[b][0], pc[b][1]); }
-    ctx3.stroke();
-
-    // obstacles, far → near
-    const projected = voxels.map(v => project(v[0] + 0.5, v[1] + 0.5, v[2] + 0.5));
-    projected.sort((a, b) => b[2] - a[2]);
-    const depths = projected.map(p => p[2]);
-    const dMin = Math.min(...depths, 0), dMax = Math.max(...depths, 1);
-    ctx3.fillStyle = cssVar('--muted');
-    for (const p of projected) {
-      const t = (dMax - p[2]) / (dMax - dMin + 1e-9);
-      ctx3.globalAlpha = 0.10 + 0.22 * t;
-      ctx3.fillRect(p[0] - 1.5, p[1] - 1.5, 3, 3);
-    }
-    ctx3.globalAlpha = 1;
-
-    // paths on top
-    for (const s of pathSpecs) {
-      if (!enabled.get(s.algoId)) continue;
-      ctx3.strokeStyle = chipHex(s.algoId);
-      ctx3.lineWidth = 2;
-      ctx3.beginPath();
-      s.path.forEach((p, i) => {
-        const q = project(p[0] + 0.5, p[1] + 0.5, (p[2] ?? 0) + 0.5);
-        if (i === 0) ctx3.moveTo(q[0], q[1]); else ctx3.lineTo(q[0], q[1]);
-      });
-      ctx3.stroke();
-    }
-
-    const ps = project(start[0] + 0.5, start[1] + 0.5, (start[2] ?? 0) + 0.5);
-    const pe = project(end[0] + 0.5, end[1] + 0.5, (end[2] ?? 0) + 0.5);
-    ctx3.fillStyle = '#0ca30c'; ctx3.fillRect(ps[0] - 4, ps[1] - 4, 8, 8);
-    ctx3.fillStyle = '#d03b3b'; ctx3.fillRect(pe[0] - 4, pe[1] - 4, 8, 8);
-  }
-
-  let dragging = false, lastX = 0, lastY = 0;
-  cv3.addEventListener('pointerdown', e => { dragging = true; lastX = e.clientX; lastY = e.clientY; cv3.setPointerCapture(e.pointerId); });
-  cv3.addEventListener('pointermove', e => {
-    if (!dragging) return;
-    view.yaw += (e.clientX - lastX) * 0.01;
-    view.pitch = Math.max(-1.45, Math.min(1.45, view.pitch + (e.clientY - lastY) * 0.01));
-    lastX = e.clientX; lastY = e.clientY;
-    draw3D();
-  });
-  cv3.addEventListener('pointerup', () => { dragging = false; });
-  cv3.addEventListener('wheel', e => {
-    e.preventDefault();
-    view.zoom = Math.max(0.3, Math.min(4, view.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
-    draw3D();
-  }, { passive: false });
-
+  bindOrbit(cv3, view, draw3D);
   $$('[data-vt]', mount).forEach(cb => cb.addEventListener('change', () => {
     enabled.set(cb.dataset.vt, cb.checked);
     drawSlice();
@@ -1281,10 +1854,242 @@ async function mountViewer(mount, ms, entry, pathSpecs) {
   draw3D();
 }
 
-function chipHex(algoId) {
-  const idx = S.registry.findIndex(r => r.id === algoId);
-  const slot = (idx >= 0 ? idx : 0) % 8 + 1;
-  return cssVar(`--cat-${slot}`) || '#2a78d6';
+/* Reusable rotatable voxel+path renderer (3D data or 3D projection of ND). */
+function make3DVoxelRenderer(cv, view, grid, sizes, pathSpecs, enabled, start, end, dimsPick) {
+  const ctx = cv.getContext('2d');
+  const [SX, SY, SZ] = sizes;               // sizes along the three displayed axes
+  const cx = SX / 2, cy = SY / 2, cz = SZ / 2;
+  const maxDim = Math.max(SX, SY, SZ);
+  const pick = dimsPick || [0, 1, 2];       // which user dims feed the 3 axes
+
+  // Voxel projection: for true 3D grids collect (x,y,z); for ND grids collect
+  // deduped projections onto the picked dims.
+  let voxels = [];
+  if (grid) {
+    const gshape = grid.shape;              // grid order = reversed user order
+    const n = gshape.length;
+    const userSizes = gshape.slice().reverse();
+    const strides = new Array(n);
+    strides[n - 1] = 1;
+    for (let i = n - 2; i >= 0; i--) strides[i] = strides[i + 1] * gshape[i + 1];
+    const seen = n > 3 ? new Set() : null;
+    const coord = new Array(n).fill(0);
+    for (let flat = 0; flat < grid.data.length; flat++) {
+      if (grid.data[flat]) {
+        let rem = flat;
+        for (let i = 0; i < n; i++) { coord[i] = Math.floor(rem / strides[i]); rem %= strides[i]; }
+        // coord is grid-order; user dim u = coord[n-1-u]
+        const p = [coord[n - 1 - pick[0]], coord[n - 1 - pick[1]], coord[n - 1 - pick[2]]];
+        if (seen) {
+          const k = p.join(',');
+          if (seen.has(k)) continue;
+          seen.add(k);
+        }
+        voxels.push(p);
+      }
+    }
+    const MAX_VOX = 50000;
+    if (voxels.length > MAX_VOX) {
+      const stride = Math.ceil(voxels.length / MAX_VOX);
+      voxels = voxels.filter((_, i) => i % stride === 0);
+    }
+  }
+
+  function project(x, y, z) {
+    const s = view.zoom * (380 / maxDim);
+    const x1 = (x - cx) * Math.cos(view.yaw) - (y - cy) * Math.sin(view.yaw);
+    const y1 = (x - cx) * Math.sin(view.yaw) + (y - cy) * Math.cos(view.yaw);
+    const z1 = (z - cz);
+    const y2 = y1 * Math.cos(view.pitch) - z1 * Math.sin(view.pitch);
+    const z2 = y1 * Math.sin(view.pitch) + z1 * Math.cos(view.pitch);
+    return [x1 * s + cv.width / 2, -z2 * s + cv.height / 2, y2];
+  }
+
+  const pickPt = pt => [pt[pick[0]] ?? 0, pt[pick[1]] ?? 0, pt[pick[2]] ?? 0];
+
+  return function draw() {
+    ctx.fillStyle = cssVar('--page');
+    ctx.fillRect(0, 0, cv.width, cv.height);
+
+    const corners = [[0, 0, 0], [SX, 0, 0], [SX, SY, 0], [0, SY, 0], [0, 0, SZ], [SX, 0, SZ], [SX, SY, SZ], [0, SY, SZ]];
+    const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+    const pc = corners.map(k => project(k[0], k[1], k[2]));
+    ctx.strokeStyle = cssVar('--baseline');
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const [a, b] of edges) { ctx.moveTo(pc[a][0], pc[a][1]); ctx.lineTo(pc[b][0], pc[b][1]); }
+    ctx.stroke();
+
+    if (voxels.length) {
+      const projected = voxels.map(v => project(v[0] + 0.5, v[1] + 0.5, v[2] + 0.5));
+      projected.sort((a, b) => b[2] - a[2]);
+      const depths = projected.map(p => p[2]);
+      const dMin = Math.min(...depths, 0), dMax = Math.max(...depths, 1);
+      ctx.fillStyle = cssVar('--muted');
+      for (const p of projected) {
+        const t = (dMax - p[2]) / (dMax - dMin + 1e-9);
+        ctx.globalAlpha = 0.10 + 0.22 * t;
+        ctx.fillRect(p[0] - 1.5, p[1] - 1.5, 3, 3);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    for (const s of pathSpecs) {
+      if (enabled && !enabled.get(s.key || s.algoId)) continue;
+      ctx.strokeStyle = chipHex(s.algoId);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      s.path.forEach((pt, i) => {
+        const [px, py, pz] = pickPt(pt);
+        const q = project(px + 0.5, py + 0.5, pz + 0.5);
+        if (i === 0) ctx.moveTo(q[0], q[1]); else ctx.lineTo(q[0], q[1]);
+      });
+      ctx.stroke();
+    }
+
+    if (start) {
+      const [px, py, pz] = pickPt(start);
+      const ps = project(px + 0.5, py + 0.5, pz + 0.5);
+      ctx.fillStyle = '#0ca30c'; ctx.fillRect(ps[0] - 4, ps[1] - 4, 8, 8);
+    }
+    if (end) {
+      const [px, py, pz] = pickPt(end);
+      const pe = project(px + 0.5, py + 0.5, pz + 0.5);
+      ctx.fillStyle = '#d03b3b'; ctx.fillRect(pe[0] - 4, pe[1] - 4, 8, 8);
+    }
+  };
+}
+
+function bindOrbit(cv, view, draw) {
+  let dragging = false, lx = 0, ly = 0;
+  cv.addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    view.yaw += (e.clientX - lx) * 0.01;
+    view.pitch = Math.max(-1.45, Math.min(1.45, view.pitch + (e.clientY - ly) * 0.01));
+    lx = e.clientX; ly = e.clientY;
+    draw();
+  });
+  cv.addEventListener('pointerup', () => { dragging = false; });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    view.zoom = Math.max(0.3, Math.min(4, view.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+    draw();
+  }, { passive: false });
+}
+
+/* ---- ND viewer: coordinate traces + 3-of-N projection ---- */
+function mountViewerND(mount, ms, entry, pathSpecs, grid) {
+  const dims = ms.dims;
+  const sizes = ms.shape || grid.shape.slice().reverse();   // user-order sizes
+  const enabled = new Map(pathSpecs.map(s => [s.key || s.algoId, true]));
+  const pick = [0, 1, 2];
+
+  const dimSel = (i) => `<select data-dimpick="${i}">
+    ${sizes.map((_, d) => `<option value="${d}" ${pick[i] === d ? 'selected' : ''}>dim ${d} (x${d})</option>`).join('')}
+  </select>`;
+
+  mount.innerHTML = `
+    ${togglesHTML(pathSpecs)}
+    <div class="viewer-grid">
+      <div class="viewer-pane">
+        <h4>Coordinate traces — each axis vs. path step</h4>
+        <canvas id="v-traces" width="460" height="420"></canvas>
+        <span class="viewer-hint">One line per dimension per algorithm; smooth traces = smooth path. Dim labels at line ends.</span>
+      </div>
+      <div class="viewer-pane">
+        <h4>3D projection of ${dims}D space</h4>
+        <div class="v-controls" style="flex-wrap:wrap">
+          <span>X:</span>${dimSel(0)} <span>Y:</span>${dimSel(1)} <span>Z:</span>${dimSel(2)}
+        </div>
+        <canvas id="v-nd3d" width="460" height="420"></canvas>
+        <span class="viewer-hint">Drag to rotate · scroll to zoom · gray = obstacle projection onto chosen dims</span>
+      </div>
+    </div>`;
+
+  // ---- traces ----
+  const tcv = $('#v-traces', mount);
+  function drawTraces() {
+    const ctx = tcv.getContext('2d');
+    ctx.fillStyle = cssVar('--surface');
+    ctx.fillRect(0, 0, tcv.width, tcv.height);
+    const specs = pathSpecs.filter(s => enabled.get(s.key || s.algoId));
+    if (!specs.length) {
+      ctx.fillStyle = cssVar('--muted');
+      ctx.font = '12px system-ui, sans-serif';
+      ctx.fillText('No paths to display.', 20, 30);
+      return;
+    }
+    const M = { l: 40, r: 46, t: 12, b: 26 };
+    const W = tcv.width - M.l - M.r, H = tcv.height - M.t - M.b;
+    const maxSteps = Math.max(...specs.map(s => s.path.length));
+    const maxVal = Math.max(...sizes);
+    ctx.strokeStyle = cssVar('--grid');
+    ctx.lineWidth = 1;
+    for (const t of niceTicks(0, maxVal, 4)) {
+      const y = M.t + H - t / maxVal * H;
+      ctx.beginPath(); ctx.moveTo(M.l, y); ctx.lineTo(M.l + W, y); ctx.stroke();
+      ctx.fillStyle = cssVar('--muted');
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(fmt(t, 0), M.l - 5, y + 4);
+    }
+    ctx.strokeStyle = cssVar('--baseline');
+    ctx.strokeRect(M.l, M.t, W, H);
+    ctx.fillStyle = cssVar('--ink-2');
+    ctx.textAlign = 'center';
+    ctx.fillText('path step →', M.l + W / 2, tcv.height - 8);
+
+    // Line style: color = algorithm; per-dim identity via end-of-line label.
+    for (const s of specs) {
+      const color = chipHex(s.algoId);
+      for (let d = 0; d < dims; d++) {
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.45 + 0.55 * (d % 2);   // alternate emphasis to separate dense lines
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        s.path.forEach((pt, i) => {
+          const x = M.l + (i / Math.max(1, maxSteps - 1)) * W;
+          const y = M.t + H - (pt[d] / maxVal) * H;
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+        const lastPt = s.path[s.path.length - 1];
+        ctx.fillStyle = cssVar('--ink');
+        ctx.textAlign = 'left';
+        ctx.font = '11px system-ui, sans-serif';
+        const lx = M.l + W + 4;
+        const ly = M.t + H - (lastPt[d] / maxVal) * H + 4;
+        ctx.fillText(`x${d}`, lx, ly);
+      }
+    }
+  }
+
+  // ---- 3D projection ----
+  const cv3 = $('#v-nd3d', mount);
+  const view = { yaw: 0.7, pitch: 0.45, zoom: 1.0 };
+  let draw3D;
+  function rebuild3D() {
+    const sz = [sizes[pick[0]], sizes[pick[1]], sizes[pick[2]]];
+    draw3D = make3DVoxelRenderer(cv3, view, grid, sz, pathSpecs, enabled,
+                                 entry.start, entry.end, pick.slice());
+    draw3D();
+  }
+  bindOrbit(cv3, view, () => draw3D && draw3D());
+
+  $$('[data-dimpick]', mount).forEach(sel => sel.addEventListener('change', () => {
+    pick[Number(sel.dataset.dimpick)] = Number(sel.value);
+    rebuild3D();
+  }));
+  $$('[data-vt]', mount).forEach(cb => cb.addEventListener('change', () => {
+    enabled.set(cb.dataset.vt, cb.checked);
+    drawTraces();
+    draw3D && draw3D();
+  }));
+
+  drawTraces();
+  rebuild3D();
 }
 
 /* ===================== init ===================== */
@@ -1293,10 +2098,12 @@ function chipHex(algoId) {
   try {
     S.registry = await api('/api/registry');
     await refreshLists();
-    S.registry.forEach(spec => {
-      F.algos[spec.id] = { on: true,
-                           params: Object.fromEntries(spec.params.map(p => [p.name, p.default])) };
-    });
+    // Sensible default: one instance of each algorithm that supports 2D.
+    if (!F.algoList.length) {
+      F.algoList = S.registry
+        .filter(spec => specSupports(spec, 2))
+        .map(spec => ({ id: spec.id, params: defaultParams(spec) }));
+    }
     renderJobsIndicator();
     renderRunTab();
     if (anyActivity()) ensurePolling();

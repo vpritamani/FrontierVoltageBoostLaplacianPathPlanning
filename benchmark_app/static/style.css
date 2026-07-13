@@ -411,6 +411,47 @@ a.plain:hover { text-decoration: underline; }
 
 .modal.wide { width: min(960px, 95vw); max-height: 92vh; overflow-y: auto; }
 
+/* ---------------- Algorithm instance builder ---------------- */
+
+.algo-inst-list { display: flex; flex-direction: column; gap: 6px; }
+.algo-inst {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.algo-inst.bad { border-color: var(--status-critical); }
+.algo-inst .inst-params { font-size: 12px; color: var(--ink-2); flex: 1; }
+.algo-inst .inst-warn { font-size: 12px; color: var(--status-critical); font-weight: 550; }
+.add-form {
+  border: 1px dashed var(--baseline);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.add-form .algo-params { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; }
+.add-form .algo-params .field { min-width: 130px; max-width: 180px; }
+
+/* ---------------- Metric graph ---------------- */
+
+.graph-wrap { position: relative; margin-top: 8px; }
+.graph-wrap canvas {
+  border: 1px solid var(--grid);
+  border-radius: 8px;
+  background: var(--surface);
+  max-width: 100%;
+  touch-action: none;
+}
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
 /* ---------------- Compare tab ---------------- */
 
 .cmp-runs { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
@@ -424,3 +465,26 @@ a.plain:hover { text-decoration: underline; }
   padding: 6px 10px;
   margin: 10px 0;
 }
+
+.steer-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.steer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--baseline);
+  border-radius: 14px;
+  padding: 4px 10px;
+  background: var(--page);
+}
+.steer-chip button {
+  border: none;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.steer-chip button:hover { color: var(--status-critical); }

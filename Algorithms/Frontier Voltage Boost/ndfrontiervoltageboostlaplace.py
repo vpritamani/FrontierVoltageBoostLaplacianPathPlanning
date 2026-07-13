@@ -114,7 +114,9 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
         end_g = list(reversed(end))    # grid-order end coords
         pos   = [float(c) for c in reversed(start)]  # grid-order position
 
-        path = [tuple(reversed([math.floor(p) for p in pos]))]
+        # Raw continuous positions in user (x, y, ...) order — round only for
+        # visualization, never for smoothness metrics or reporting.
+        path = [tuple(reversed(pos))]
 
         for _ in range(10000):
             if any(not (0 < pos[d] < phi.shape[d] - 1) for d in range(ndim)):
@@ -142,10 +144,10 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
             for d in range(ndim):
                 pos[d] -= step * grad[d]
 
-            path.append(tuple(reversed([math.floor(p) for p in pos])))
+            path.append(tuple(reversed(pos)))
 
             if all(pos[d] - 1 <= end_g[d] <= pos[d] + 1 for d in range(ndim)):
-                path.append(tuple(end))
+                path.append(tuple(float(c) for c in end))
                 return path
 
         return None
@@ -207,8 +209,9 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
         grey = self.map.to_image()
         rgb  = np.stack([grey, grey, grey], axis=2).copy()
         if self._path:
+            # Continuous coords — round only for pixel painting.
             for pt in self._path:
-                x, y = pt[0], pt[1]
+                x, y = int(round(pt[0])), int(round(pt[1]))
                 if 0 <= y < rgb.shape[0] and 0 <= x < rgb.shape[1]:
                     rgb[y, x] = [128, 128, 255]
         sx, sy = self.map.start[0], self.map.start[1]
@@ -220,7 +223,7 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
     def _visualize_3d(self):
         import os
         from PIL import Image
-        path_set = set(map(tuple, self._path)) if self._path else set()
+        path_set = set(tuple(int(round(c)) for c in pt) for pt in self._path) if self._path else set()
         sx, sy, sz = self.map.start[0], self.map.start[1], self.map.start[2]
         ex, ey, ez = self.map.end[0],   self.map.end[1],   self.map.end[2]
         out_dir = 'fvb_nd_3d_result'

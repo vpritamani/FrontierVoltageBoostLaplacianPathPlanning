@@ -237,6 +237,22 @@ def api_run_image(run_id, algo_id, name):
         os.path.join(storage.run_dir(run_id), 'images', algo_id), name)
 
 
+@app.get('/api/compare/results.csv')
+def api_compare_csv():
+    """Combined raw per-record CSV for several runs: ?runs=id1,id2,…"""
+    ids = [i for i in (request.args.get('runs') or '').split(',') if i]
+    if not ids:
+        raise ValueError('pass ?runs=<id>,<id>,…')
+    from smoothness_metrics import SmoothnessMetrics
+    all_results = []
+    for run_id in ids:
+        _check(run_id)
+        all_results.extend(storage.get_run_results(run_id))
+    text = storage.results_csv_text(all_results, SmoothnessMetrics.METRIC_KEYS)
+    return Response(text, mimetype='text/csv', headers={
+        'Content-Disposition': 'attachment; filename=compare_results.csv'})
+
+
 @app.get('/api/runs/<run_id>/results.csv')
 def api_run_csv(run_id):
     _check(run_id)

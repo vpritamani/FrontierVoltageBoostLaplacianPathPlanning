@@ -94,71 +94,76 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
         preventing the path from skipping over wavefront boundaries.
         When bilinear_interpolation is True, phi is sampled at continuous positions
         using bilinear interpolation instead of nearest-cell indexing.
+
+        The returned path keeps the raw continuous (x, y) positions — this is
+        where the smoothness advantage of the method lives. Round only for
+        pixel-level visualization, never for metrics or reporting.
         """
         sx, sy = start
         ex, ey = end
 
-        posr = float(sy)  # current row  (y)
-        posc = float(sx)  # current col  (x)
+        posx = float(sx)
+        posy = float(sy)
 
-        path = [(round(posc), round(posr))]
+        path = [(posx, posy)]
 
         for _ in range(10000):
-            if not (0 < posr < phi.shape[0] - 1 and 0 < posc < phi.shape[1] - 1):
+            if not (0 < posy < phi.shape[0] - 1 and 0 < posx < phi.shape[1] - 1):
                 return None
 
             if self.bilinear_interpolation:
-                gradr, gradc = self._get_grad_bilinear(phi, posr, posc)
+                gradx, grady = self._get_grad_bilinear(phi, posx, posy)
             else:
-                r = math.floor(posr)
-                c = math.floor(posc)
-                point_v = phi[r, c]
-                gradr = self._fv(phi[r + 1, c], point_v) - self._fv(phi[r - 1, c], point_v)
-                gradc = self._fv(phi[r, c + 1], point_v) - self._fv(phi[r, c - 1], point_v)
+                y = math.floor(posy)
+                x = math.floor(posx)
+                point_v = phi[y, x]
+                grady = self._fv(phi[y + 1, x], point_v) - self._fv(phi[y - 1, x], point_v)
+                gradx = self._fv(phi[y, x + 1], point_v) - self._fv(phi[y, x - 1], point_v)
 
-            mag = math.sqrt(gradr ** 2 + gradc ** 2)
+            mag = math.sqrt(gradx ** 2 + grady ** 2)
             if mag == 0:
                 return None
 
             step = self.step_size / mag
-            posr -= step * gradr
-            posc -= step * gradc
+            posx -= step * gradx
+            posy -= step * grady
 
-            path.append((math.floor(posc), math.floor(posr)))
+            path.append((posx, posy))
 
-            if posc - 1 <= ex <= posc + 1 and ey - 1 <= posr <= ey + 1:
-                path.append((ex, ey))
+            if posx - 1 <= ex <= posx + 1 and ey - 1 <= posy <= ey + 1:
+                path.append((float(ex), float(ey)))
                 return path
 
         return None
 
     @staticmethod
-    def _bilinear_interp(phi, r, c):
-        r0, c0 = math.floor(r), math.floor(c)
-        r1, c1 = r0 + 1, c0 + 1
-        r0 = max(0, min(r0, phi.shape[0] - 1))
-        r1 = max(0, min(r1, phi.shape[0] - 1))
-        c0 = max(0, min(c0, phi.shape[1] - 1))
-        c1 = max(0, min(c1, phi.shape[1] - 1))
-        dr = r - math.floor(r)
-        dc = c - math.floor(c)
-        return (  (1 - dr) * (1 - dc) * phi[r0, c0]
-                + (1 - dr) *      dc  * phi[r0, c1]
-                +      dr  * (1 - dc) * phi[r1, c0]
-                +      dr  *      dc  * phi[r1, c1])
+    def _bilinear_interp(phi, x, y):
+        """Sample phi at continuous (x, y); grid is indexed phi[y, x]."""
+        y0, x0 = math.floor(y), math.floor(x)
+        y1, x1 = y0 + 1, x0 + 1
+        y0 = max(0, min(y0, phi.shape[0] - 1))
+        y1 = max(0, min(y1, phi.shape[0] - 1))
+        x0 = max(0, min(x0, phi.shape[1] - 1))
+        x1 = max(0, min(x1, phi.shape[1] - 1))
+        dy = y - math.floor(y)
+        dx = x - math.floor(x)
+        return (  (1 - dy) * (1 - dx) * phi[y0, x0]
+                + (1 - dy) *      dx  * phi[y0, x1]
+                +      dy  * (1 - dx) * phi[y1, x0]
+                +      dy  *      dx  * phi[y1, x1])
 
     @staticmethod
     def _fv(nv, pv):
         """Cap neighbour value to ceil(current value) to stay within the active wavefront."""
         return min(nv, math.ceil(pv))
 
-    def _get_grad_bilinear(self, phi, posr, posc):
-        point_v = self._bilinear_interp(phi, posr, posc)
-        gradr = (self._fv(self._bilinear_interp(phi, posr + 1, posc), point_v) -
-                 self._fv(self._bilinear_interp(phi, posr - 1, posc), point_v))
-        gradc = (self._fv(self._bilinear_interp(phi, posr, posc + 1), point_v) -
-                 self._fv(self._bilinear_interp(phi, posr, posc - 1), point_v))
-        return gradr, gradc
+    def _get_grad_bilinear(self, phi, posx, posy):
+        point_v = self._bilinear_interp(phi, posx, posy)
+        gradx = (self._fv(self._bilinear_interp(phi, posx + 1, posy), point_v) -
+                 self._fv(self._bilinear_interp(phi, posx - 1, posy), point_v))
+        grady = (self._fv(self._bilinear_interp(phi, posx, posy + 1), point_v) -
+                 self._fv(self._bilinear_interp(phi, posx, posy - 1), point_v))
+        return gradx, grady
 
     def _visualize(self):
         from PIL import Image
@@ -166,9 +171,11 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
         rgb = np.stack([grey, grey, grey], axis=2).copy()  # (H, W, 3)
 
         if self._path:
+            # Path coords are continuous — round only for pixel painting.
             for x, y in self._path:
-                if 0 <= y < rgb.shape[0] and 0 <= x < rgb.shape[1]:
-                    rgb[y, x] = [128, 128, 255]
+                xi, yi = int(round(x)), int(round(y))
+                if 0 <= yi < rgb.shape[0] and 0 <= xi < rgb.shape[1]:
+                    rgb[yi, xi] = [128, 128, 255]
 
         sx, sy = self.map.start
         ex, ey = self.map.end

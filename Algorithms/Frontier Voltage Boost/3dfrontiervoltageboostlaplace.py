@@ -99,7 +99,9 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
         posy = float(sy)
         posx = float(sx)
 
-        path = [(round(posx), round(posy), round(posz))]
+        # Raw continuous positions — round only for visualization, never for
+        # smoothness metrics or reporting.
+        path = [(posx, posy, posz)]
 
         for _ in range(10000):
             if not (0 < posz < phi.shape[0] - 1 and
@@ -127,12 +129,12 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
             posy -= step * grady
             posx -= step * gradx
 
-            path.append((math.floor(posx), math.floor(posy), math.floor(posz)))
+            path.append((posx, posy, posz))
 
             if (posx - 1 <= ex <= posx + 1 and
                     posy - 1 <= ey <= posy + 1 and
                     posz - 1 <= ez <= posz + 1):
-                path.append((ex, ey, ez))
+                path.append((float(ex), float(ey), float(ez)))
                 return path
 
         return None
@@ -178,8 +180,9 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
         from PIL import Image
         path_set = set()
         if self._path:
+            # Continuous coords — round only for pixel painting.
             for x, y, z in self._path:
-                path_set.add((x, y, z))
+                path_set.add((int(round(x)), int(round(y)), int(round(z))))
 
         sx, sy, sz = self.map.start
         ex, ey, ez = self.map.end

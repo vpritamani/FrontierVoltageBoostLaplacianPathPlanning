@@ -22,9 +22,14 @@ def _worker(conn, algo_id: str, params: dict, grid: np.ndarray, start: tuple, en
     """Child-process entry: build map + algorithm, solve, send result back."""
     try:
         from benchmark_app.registry import get_spec
-        from map_generation import Map2D, Map3D
+        from map_generation import Map, Map2D, Map3D
 
-        map_cls = Map2D if grid.ndim == 2 else Map3D
+        if grid.ndim == 2:
+            map_cls = Map2D
+        elif grid.ndim == 3:
+            map_cls = Map3D
+        else:
+            map_cls = Map   # N-dimensional grids use the base Map
         map_obj = map_cls(grid, tuple(start), tuple(end))
 
         spec = get_spec(algo_id)
@@ -35,7 +40,9 @@ def _worker(conn, algo_id: str, params: dict, grid: np.ndarray, start: tuple, en
         elapsed = time.perf_counter() - t0
 
         if path is not None:
-            path = [tuple(int(c) for c in p) for p in path]
+            # Preserve continuous coordinates — algorithms like FVB return
+            # decimal positions and metrics must be computed on the raw path.
+            path = [tuple(float(c) for c in p) for p in path]
 
         conn.send({'ok': True, 'path': path, 'time_s': elapsed})
     except Exception:

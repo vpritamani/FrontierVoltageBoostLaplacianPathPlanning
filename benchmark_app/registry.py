@@ -64,16 +64,19 @@ class ParamSpec:
 class AlgorithmSpec:
     id: str
     label: str
-    dims: list            # supported dimensionalities, e.g. [2] or [2, 3]
+    dims: "list | None"   # supported dimensionalities, e.g. [2] or [2, 3]; None = any
     module_file: str      # path relative to project root
     class_name: str
     params: list = field(default_factory=list)   # list[ParamSpec]
+
+    def supports_dims(self, n: int) -> bool:
+        return self.dims is None or n in self.dims
 
     def to_json(self) -> dict:
         return {
             'id': self.id,
             'label': self.label,
-            'dims': self.dims,
+            'dims': self.dims,        # null = any dimensionality
             'params': [p.to_json() for p in self.params],
         }
 
@@ -117,6 +120,40 @@ REGISTRY: list[AlgorithmSpec] = [
             ParamSpec('step_size', 'Step size', 'float', 1.0, min=0.05, step=0.05,
                       help='Gradient descent step size.'),
             ParamSpec('bilinear_interpolation', 'Bilinear interpolation', 'bool', True,
+                      help='Sample phi continuously during gradient descent.'),
+        ],
+    ),
+    AlgorithmSpec(
+        id='fvb_laplace_3d',
+        label='Frontier Voltage Boost Laplace 3D',
+        dims=[3],
+        module_file=os.path.join('Algorithms', 'Frontier Voltage Boost', '3dfrontiervoltageboostlaplace.py'),
+        class_name='FrontierVoltageBoostLaplace3D',
+        params=[
+            ParamSpec('n_l', 'Laplace iterations (n_l)', 'int', 10, min=1,
+                      help='Laplace relaxation iterations per wavefront step.'),
+            ParamSpec('epsilon', 'Epsilon', 'float', 0.5, min=0.0, step=0.05,
+                      help='Cell is solved when phi <= v_max - epsilon.'),
+            ParamSpec('step_size', 'Step size', 'float', 1.0, min=0.05, step=0.05,
+                      help='Gradient descent step size.'),
+            ParamSpec('bilinear_interpolation', 'Trilinear interpolation', 'bool', True,
+                      help='Sample phi continuously during gradient descent.'),
+        ],
+    ),
+    AlgorithmSpec(
+        id='fvb_laplace_nd',
+        label='Frontier Voltage Boost Laplace ND',
+        dims=None,   # any dimensionality
+        module_file=os.path.join('Algorithms', 'Frontier Voltage Boost', 'ndfrontiervoltageboostlaplace.py'),
+        class_name='FrontierVoltageBoostLaplaceND',
+        params=[
+            ParamSpec('n_l', 'Laplace iterations (n_l)', 'int', 10, min=1,
+                      help='Laplace relaxation iterations per wavefront step.'),
+            ParamSpec('epsilon', 'Epsilon', 'float', 0.5, min=0.0, step=0.05,
+                      help='Cell is solved when phi <= v_max - epsilon.'),
+            ParamSpec('step_size', 'Step size', 'float', 1.0, min=0.05, step=0.05,
+                      help='Gradient descent step size.'),
+            ParamSpec('bilinear_interpolation', 'N-linear interpolation', 'bool', True,
                       help='Sample phi continuously during gradient descent.'),
         ],
     ),

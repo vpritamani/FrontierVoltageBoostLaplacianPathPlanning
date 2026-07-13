@@ -135,10 +135,15 @@ def enqueue_run(config: dict, map_set_from_job: str | None = None) -> dict:
         'map_set_name': None,
         'dims': None,
         'map_names': config.get('map_names'),
+        # Each entry is an *instance*: the same algorithm may appear several
+        # times with different params, so every instance gets a unique key
+        # (used for result grouping and paths/images storage dirs).
         'algorithms': [
-            {'id': a['id'], 'label': get_spec(a['id']).label,
+            {'key': f"{a['id']}-{i + 1}",
+             'id': a['id'],
+             'label': a.get('label') or get_spec(a['id']).label,
              'params': get_spec(a['id']).coerce_params(a.get('params'))}
-            for a in config['algorithms']
+            for i, a in enumerate(config['algorithms'])
         ],
         'solve_timeout_s': float(config.get('solve_timeout_s') or 120.0),
         'metric_params': metric_params,
@@ -203,7 +208,7 @@ def recompute_metrics(run_id: str, theta_degrees: float, sweep_range: int,
     for rec in results:
         if not rec.get('solved'):
             continue
-        path = storage.get_path_json(run_id, rec['algorithm_id'], rec['map_stem'])
+        path = storage.get_path_json(run_id, _rec_key(rec), rec['map_stem'])
         if path is None:
             continue
         sm = SmoothnessMetrics([tuple(p) for p in path], **metric_params)
@@ -287,14 +292,15 @@ def _execute_generate(job: dict):
         else:
             manifest = mapgen.generate_map_set(
                 name=gp.get('name'),
-                dims=int(gp['dims']),
-                width=int(gp['width']),
-                height=int(gp['height']),
+                dims=int(gp.get('dims') or 2),
+                width=int(gp.get('width') or 0),
+                height=int(gp.get('height') or 0),
                 depth=int(gp.get('depth') or 30),
                 num_maps=int(gp.get('num_maps') or 5),
                 obstacles_min=int(gp.get('obstacles_min') or 5),
                 obstacles_max=int(gp.get('obstacles_max') or 30),
                 seed=int(gp['seed']) if gp.get('seed') not in (None, '') else None,
+                shape=gp.get('shape') or None,
                 progress_cb=cb,
                 id_holder=holder,
             )
@@ -316,9 +322,11 @@ def _render_path_image(out_path: str, grid: np.ndarray, path, start, end):
     grey = ((1 - grid) * 255).astype(np.uint8)
     rgb = np.stack([grey, grey, grey], axis=2)
     if path:
+        # Path coords are continuous — round only for pixel painting.
         for x, y in path:
-            if 0 <= y < rgb.shape[0] and 0 <= x < rgb.shape[1]:
-                rgb[y, x] = [110, 110, 255]
+            xi, yi = int(round(x)), int(round(y))
+            if 0 <= yi < rgb.shape[0] and 0 <= xi < rgb.shape[1]:
+                rgb[yi, xi] = [110, 110, 255]
     rgb[start[1], start[0]] = [0, 200, 0]
     rgb[end[1], end[0]] = [220, 0, 0]
     Image.fromarray(rgb, mode='RGB').save(out_path)
@@ -331,16 +339,28 @@ def _euclidean_length(path) -> float:
     return float(np.sum(np.linalg.norm(np.diff(pts, axis=0), axis=1)))
 
 
+def _algo_key(entry: dict) -> str:
+    """Instance key with fallback for runs created before instance support."""
+    return entry.get('key') or entry.get('algorithm_key') or entry.get('algorithm_id') or entry['id']
+
+
+def _rec_key(rec: dict) -> str:
+    return rec.get('algorithm_key') or rec.get('algorithm_id')
+
+
 def _summarize(algorithms: list, results: list) -> list:
     summary = []
     for algo in algorithms:
-        recs = [r for r in results if r['algorithm_id'] == algo['id']]
+        key = _algo_key(algo)
+        recs = [r for r in results if _rec_key(r) == key]
         solved = [r for r in recs if r['solved']]
         times = [r['time_s'] for r in solved if r['time_s'] is not None]
         pens = [r['metrics']['steering_penalty'] for r in solved if r.get('metrics')]
         summary.append({
+            'algorithm_key': key,
             'algorithm_id': algo['id'],
             'label': algo['label'],
+            'params': algo.get('params'),
             'total': len(recs),
             'solved': len(solved),
             'mean_time_s': float(np.mean(times)) if times else None,
@@ -385,6 +405,12 @@ def _execute_run(job: dict):
         manifest['map_set_name'] = ms['name']
         manifest['dims'] = ms['dims']
 
+        # Every algorithm instance must support this dimensionality.
+        for algo in manifest['algorithms']:
+            if not get_spec(algo['id']).supports_dims(ms['dims']):
+                raise RuntimeError(
+                    f"{algo['label']} does not support {ms['dims']}D maps")
+
         wanted = manifest.get('map_names')
         maps = [m for m in ms['maps'] if not wanted or m['name'] in wanted]
         if not maps:
@@ -406,6 +432,7 @@ def _execute_run(job: dict):
 
             for algo in manifest['algorithms']:
                 check_cancel()
+                key = _algo_key(algo)
                 _set_progress(job, done, total, f"{m['name']} · {algo['label']}")
 
                 outcome = solve_with_timeout(
@@ -424,6 +451,7 @@ def _execute_run(job: dict):
                     'map_name': m['name'],
                     'map_stem': m['stem'],
                     'dims': ms['dims'],
+                    'algorithm_key': key,
                     'algorithm_id': algo['id'],
                     'algorithm_label': algo['label'],
                     'params': algo['params'],
@@ -441,10 +469,10 @@ def _execute_run(job: dict):
                     record['path_steps'] = len(path)
                     record['path_length_euclidean'] = _euclidean_length(path)
                     record['metrics'] = SmoothnessMetrics(path, **metric_params).compute_all()
-                    storage.save_path_json(run_id, algo['id'], m['stem'], path)
+                    storage.save_path_json(run_id, key, m['stem'], path)
                     if ms['dims'] == 2:
                         _render_path_image(
-                            storage.image_path(run_id, algo['id'], m['stem']),
+                            storage.image_path(run_id, key, m['stem']),
                             grid, path, start, end,
                         )
                         record['has_image'] = True

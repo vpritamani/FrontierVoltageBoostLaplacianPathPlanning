@@ -31,9 +31,10 @@ This starts a local server at `http://127.0.0.1:8177` and opens your browser. Fr
 
 - **Generate map sets** (2D or 3D, any size/count, obstacle range, optional seed) — every map is verified solvable with A* before being accepted — or **import** existing `.npy` map folders
 - **Run one or more algorithms** with full parameter control on new maps, an existing map set, or any subset of maps — and **cancel** an in-flight run at any point (partial results are kept)
-- **Compare results** — per-algorithm summaries (solved rate, mean solve time, mean steering penalty, path length), a metric comparison view, the full per-map results table with all smoothness metrics, and side-by-side path images; the **Compare tab** does the same across multiple runs (e.g. hyperparameter sweeps)
-- **Metrics lab** — solved paths are stored with each run, so you can recompute all smoothness metrics with a different steering θ / sweep range instantly, preview the effect, and optionally save — without re-running any planner
-- **3D viewer** — for 3D runs, a slice-by-slice layer view plus a rotatable, zoomable 3D view with each algorithm's path overlaid
+- **Compare results** — per-instance summaries labeled with their hyperparameters (the same algorithm can be added to a run any number of times with different parameters), a metric comparison view, the full per-map results table with all smoothness metrics, and side-by-side path images
+- **Compare tab** — cross-run comparison with any number of steering-penalty configs at once (e.g. @20° and @30° side by side or as X/Y axes), a metric graph (2D/3D scatter or lines vs map size/dimensionality with one line per algorithm configuration), PNG export of the graph, and a combined raw-data CSV for all selected runs
+- **Metrics lab** — solved paths are stored with each run (FVB paths keep their continuous decimal coordinates), so you can recompute all smoothness metrics with a different steering θ / sweep range instantly, preview the effect, and optionally save — without re-running any planner
+- **3D / ND viewer** — for 3D runs, a slice-by-slice layer view plus a rotatable, zoomable 3D view; for higher-dimensional runs, coordinate traces (each axis vs. path step) plus a rotatable 3D projection of any three chosen dimensions
 - **Keep everything** — every run and map set is stored under `Benchmark Data/` with a unique ID (identical runs never overwrite each other) and is available again on the next launch
 - **Export** any run as CSV
 - **Delete** runs or map sets with explicit warnings about what will be lost

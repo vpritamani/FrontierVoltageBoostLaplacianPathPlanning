@@ -131,7 +131,8 @@ for row in rows:
 
     if save_paths:
         from PIL import Image
-        path_set = {(x, y, z) for x, y, z in path}
+        # Path coords are continuous — round only for pixel painting.
+        path_set = {(int(round(x)), int(round(y)), int(round(z))) for x, y, z in path}
         sx, sy, sz = start
         ex, ey, ez = end
         for z in range(m.depth):

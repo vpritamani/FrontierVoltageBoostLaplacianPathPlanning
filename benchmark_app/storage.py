@@ -254,24 +254,33 @@ def dependent_runs(ms_id: str) -> list:
 # CSV export
 # ---------------------------------------------------------------------------
 
-def write_results_csv(run_id: str, results: list, metric_keys: list):
-    """Flatten results.json records into results.csv inside the run dir."""
+def results_csv_text(results: list, metric_keys: list) -> str:
+    """Flatten result records (possibly from several runs) into CSV text."""
+    import io
     fields = [
         'run_id', 'run_name', 'timestamp', 'map_set_id', 'map_name', 'dims',
-        'algorithm_id', 'algorithm_label', 'params',
+        'algorithm_key', 'algorithm_id', 'algorithm_label', 'params',
         'solved', 'error', 'time_s', 'path_steps', 'path_length_euclidean',
     ] + metric_keys
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fields, extrasaction='ignore')
+    writer.writeheader()
+    for rec in results:
+        row = {k: rec.get(k, '') for k in fields}
+        row['params'] = json.dumps(rec.get('params', {}))
+        metrics = rec.get('metrics') or {}
+        for mk in metric_keys:
+            row[mk] = metrics.get(mk, '')
+        writer.writerow(row)
+    return buf.getvalue()
+
+
+def write_results_csv(run_id: str, results: list, metric_keys: list):
+    """Write results.csv inside the run dir."""
     out = os.path.join(run_dir(run_id), 'results.csv')
+    text = results_csv_text(results, metric_keys)
     with open(out, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
-        writer.writeheader()
-        for rec in results:
-            row = {k: rec.get(k, '') for k in fields}
-            row['params'] = json.dumps(rec.get('params', {}))
-            metrics = rec.get('metrics') or {}
-            for mk in metric_keys:
-                row[mk] = metrics.get(mk, '')
-            writer.writerow(row)
+        f.write(text)
     return out
 
 

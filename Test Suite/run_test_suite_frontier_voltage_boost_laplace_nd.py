@@ -124,8 +124,9 @@ def _save_2d(algo, m, path, start, end, stem, out_dir, save_maps, save_paths, sa
     if save_paths:
         grey = m.to_image()
         rgb  = np.stack([grey, grey, grey], axis=2).copy()
+        # Path coords are continuous — round only for pixel painting.
         for pt in path:
-            x, y = pt[0], pt[1]
+            x, y = int(round(pt[0])), int(round(pt[1]))
             if 0 <= y < rgb.shape[0] and 0 <= x < rgb.shape[1]:
                 rgb[y, x] = [128, 128, 255]
         rgb[start[1], start[0]] = [0, 255, 0]
@@ -149,7 +150,8 @@ def _save_3d(algo, m, path, start, end, stem, out_dir, save_maps, save_paths, sa
     map_out  = os.path.join(out_dir, stem)
     os.makedirs(map_out, exist_ok=True)
 
-    path_set = {tuple(pt) for pt in path}
+    # Path coords are continuous — round only for pixel painting.
+    path_set = {tuple(int(round(c)) for c in pt) for pt in path}
     sx, sy, sz = start[0], start[1], start[2]
     ex, ey, ez = end[0],   end[1],   end[2]
 

@@ -68,32 +68,126 @@ def _save_thumb(ms_dir: str, stem: str, grid: np.ndarray, start: tuple, end: tup
     Image.fromarray(rgb, mode='RGB').save(os.path.join(thumbs, f'{stem}.png'))
 
 
+# ---------------------------------------------------------------------------
+# N-dimensional generation (dims > 3)
+# ---------------------------------------------------------------------------
+
+def _bfs_solvable(grid: np.ndarray, start: tuple, end: tuple) -> bool:
+    """Face-neighbour BFS reachability — dimension-agnostic solvability check.
+
+    Stricter than the diagonal-move A* used for 2D/3D (a face-connected path
+    implies solvability under any richer neighbourhood).
+    Points are in user (x, y, ...) order; grid is indexed reversed.
+    """
+    from collections import deque
+    s = tuple(reversed(start))
+    e = tuple(reversed(end))
+    if grid[s] != 0 or grid[e] != 0:
+        return False
+    seen = np.zeros(grid.shape, dtype=bool)
+    seen[s] = True
+    dq = deque([s])
+    while dq:
+        cur = dq.popleft()
+        if cur == e:
+            return True
+        for d in range(grid.ndim):
+            for delta in (-1, 1):
+                nb = list(cur)
+                nb[d] += delta
+                if 0 <= nb[d] < grid.shape[d]:
+                    nb = tuple(nb)
+                    if not seen[nb] and grid[nb] == 0:
+                        seen[nb] = True
+                        dq.append(nb)
+    return False
+
+
+class NDMapGenerator:
+    """Random hyper-rectangle obstacle maps for arbitrary dimensionality.
+
+    ``sizes`` is in user order (x, y, z, w, ...); the grid is allocated with
+    reversed shape so ``grid[reversed(point)]`` indexes a user-order point —
+    the same convention as Map2D/Map3D.
+    """
+
+    _MAX_RETRIES = 100
+
+    def __init__(self, sizes: list, num_obstacles_range=(5, 30)):
+        self.sizes = [int(s) for s in sizes]
+        self.num_obstacles_range = num_obstacles_range
+        min_side = min(self.sizes)
+        self.obstacle_size_range = (max(1, min_side // 20), max(2, min_side // 8))
+
+    def generate(self):
+        from map_generation import Map
+        shape = tuple(reversed(self.sizes))
+        for _ in range(self._MAX_RETRIES):
+            grid = np.zeros(shape, dtype=np.uint8)
+            for _ in range(random.randint(*self.num_obstacles_range)):
+                self._place_obstacle(grid)
+            start = self._find_free_interior(grid)
+            end = self._find_free_interior(grid)
+            if _bfs_solvable(grid, start, end):
+                return Map(grid, start, end)
+        raise RuntimeError(f'Could not generate a solvable {len(self.sizes)}D map '
+                           f'after {self._MAX_RETRIES} attempts')
+
+    def _place_obstacle(self, grid: np.ndarray):
+        size = min(random.randint(*self.obstacle_size_range), *self.sizes)
+        corner = [random.randint(0, s - size) for s in self.sizes]
+        # slices in grid (reversed) order
+        sl = tuple(slice(c, c + size) for c in reversed(corner))
+        grid[sl] = 1
+
+    def _find_free_interior(self, grid: np.ndarray) -> tuple:
+        for _ in range(100000):
+            point = tuple(random.randint(1, s - 2) for s in self.sizes)
+            if grid[tuple(reversed(point))] == 0:
+                return point
+        raise RuntimeError('Could not find a free interior cell')
+
+
 def generate_map_set(
     name: str,
     dims: int,
-    width: int,
-    height: int,
+    width: int = 0,
+    height: int = 0,
     depth: int = 30,
     num_maps: int = 5,
     obstacles_min: int = 5,
     obstacles_max: int = 30,
     seed: int | None = None,
+    shape: list | None = None,
     progress_cb=None,
     id_holder: dict | None = None,
 ) -> dict:
     """Generate a solvable map set and persist it. Returns the manifest.
 
+    2D/3D use the project generators (A*-validated); for dims > 3 pass
+    ``shape`` — a user-order size list like ``[12, 12, 12, 8]`` — and maps are
+    validated with face-neighbour BFS instead.
+
     ``id_holder`` (if given) receives the new set's id under key ``ms_id`` as
     soon as it is allocated, so a caller cancelling mid-generation can clean up
     the partial directory.
     """
-    if dims not in (2, 3):
-        raise ValueError('dims must be 2 or 3')
+    if shape:
+        sizes = [int(s) for s in shape]
+        dims = len(sizes)
+    elif dims == 2:
+        sizes = [width, height]
+    elif dims == 3:
+        sizes = [width, height, depth]
+    else:
+        raise ValueError('for dims > 3 provide a shape list, e.g. [12, 12, 12, 8]')
+
+    if dims < 2:
+        raise ValueError('dims must be >= 2')
     if num_maps < 1:
         raise ValueError('num_maps must be >= 1')
     min_side = 4  # need at least 2 interior cells per axis
-    sides = (width, height) if dims == 2 else (width, height, depth)
-    if any(s < min_side for s in sides):
+    if any(s < min_side for s in sizes):
         raise ValueError(f'each map side must be >= {min_side}')
 
     if seed is not None:
@@ -101,11 +195,13 @@ def generate_map_set(
         np.random.seed(seed)
 
     if dims == 2:
-        gen = InteriorMapGenerator2D(width=width, height=height,
+        gen = InteriorMapGenerator2D(width=sizes[0], height=sizes[1],
+                                     num_obstacles_range=(obstacles_min, obstacles_max))
+    elif dims == 3:
+        gen = InteriorMapGenerator3D(width=sizes[0], height=sizes[1], depth=sizes[2],
                                      num_obstacles_range=(obstacles_min, obstacles_max))
     else:
-        gen = InteriorMapGenerator3D(width=width, height=height, depth=depth,
-                                     num_obstacles_range=(obstacles_min, obstacles_max))
+        gen = NDMapGenerator(sizes, num_obstacles_range=(obstacles_min, obstacles_max))
 
     ms_id = storage.new_id('ms')
     if id_holder is not None:
@@ -119,9 +215,10 @@ def generate_map_set(
         'created': datetime.now().isoformat(timespec='seconds'),
         'status': 'generating',
         'dims': dims,
-        'width': width,
-        'height': height,
-        'depth': depth if dims == 3 else None,
+        'shape': sizes,                                # user-order (x, y, ...)
+        'width': sizes[0] if dims <= 3 else None,
+        'height': sizes[1] if dims <= 3 else None,
+        'depth': sizes[2] if dims == 3 else None,
         'num_maps': num_maps,
         'gen_params': {
             'obstacles_min': obstacles_min,
@@ -245,6 +342,8 @@ def import_map_set(
     if not manifest['maps']:
         raise ValueError('No importable maps found (all CSV entries missing or wrong dimensionality).')
 
+    manifest['shape'] = ([manifest['width'], manifest['height']] +
+                         ([manifest['depth']] if dims == 3 else []))
     manifest['num_maps'] = len(manifest['maps'])
     if skipped:
         manifest['gen_params']['skipped'] = skipped
