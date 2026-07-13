@@ -37,6 +37,10 @@ class SmoothnessMetrics:
 
     Args:
         path: Ordered list of coordinate tuples.
+        steering_theta_degrees: Threshold for the steering penalty metric
+            (default ``30``). Angles below it incur no penalty.
+        steering_sweep_range: Symmetric neighbor offsets checked per waypoint
+            for the steering penalty metric (default ``5``).
     """
 
     METRIC_KEYS: list[str] = [
@@ -54,17 +58,22 @@ class SmoothnessMetrics:
         "steering_penalty",
     ]
 
-    def __init__(self, path: list[tuple[float, float]]):
+    def __init__(self, path: list[tuple[float, float]],
+                 steering_theta_degrees: float = 30.0,
+                 steering_sweep_range: int = 5):
         self.path = path
         self._pathbench = PathBenchSmoothness()
         self._angle_change = AngleChangeSmoothness()
         self._deriv_v1 = DerivativeSmoothnessV1()
         self._deriv_v2 = DerivativeSmoothnessV2()
         self._discrete = DiscreteSmoothness()
-        self._steering = SteeringPenaltySmoothness()
+        self._steering = SteeringPenaltySmoothness(
+            theta_degrees=steering_theta_degrees,
+            sweep_range=steering_sweep_range,
+        )
 
     def recommended(self) -> float:
-        """Steering penalty metric at theta=30°, sweep_range=5 (recommended).
+        """Steering penalty metric at the configured theta/sweep (recommended).
 
         Returns:
             float: Total excess steering angle in degrees.  Lower is smoother.

@@ -39,6 +39,15 @@ print(metric.compute_at_thresholds(path))
 
 All classes inherit from `BaseSmoothnessMetric` (`base.py`) and are callable directly.
 
-## Integration with the test suite
+## Configurable steering parameters
 
-`run_test_suite_frontier_voltage_boost_laplace.py` automatically prints all smoothness metrics for every solved path.
+`SmoothnessMetrics` accepts the steering penalty knobs directly:
+
+```python
+sm = SmoothnessMetrics(path, steering_theta_degrees=20, steering_sweep_range=3)
+sm.compute_all()   # steering_penalty now uses θ=20°, sweep=3
+```
+
+## Integration with the benchmark app
+
+The benchmark app (`python run_app.py`) computes all metrics for every solved path, stores them with each run, and exports them as CSV. Because solved paths are stored too, the app's **Metrics lab** can recompute every metric at a different θ / sweep range on any past run — no planner re-run needed.
