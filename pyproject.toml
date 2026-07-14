@@ -6,6 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "frontier-voltage-boost-laplacian"
 version = "0.1.0"
 requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pillow",
+    "scipy",
+]
 
 [tool.setuptools]
 packages = ["Algorithms", "map_generation", "smoothness_metrics"]
