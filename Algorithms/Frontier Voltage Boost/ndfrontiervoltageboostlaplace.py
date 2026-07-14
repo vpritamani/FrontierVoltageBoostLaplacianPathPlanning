@@ -57,7 +57,7 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
             phi[free | obstacle] = v_max
 
         self._phi = phi
-        self._path = self._gradient_descent(phi, start, end)
+        self._path = self._gradient_descent(phi, start, end, obstacle)
 
         if visualize:
             self._visualize()
@@ -72,6 +72,12 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    # Interleaved-relaxation budget for _gradient_descent (see 2D variant).
+    _RELAX_BATCH = 500          # Laplace sweeps per stall
+    _MAX_RELAX = 60000          # total relaxation sweeps before giving up
+    _MAX_STEPS = 50000          # descent moves before giving up
+    _STALL_WINDOW = 2000        # descent moves without progress => relax
 
     def _build_masks(self, grid, end_idx):
         obstacle = grid == 1
@@ -104,53 +110,85 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
         phi[free]    = new_phi[free]
         phi[end_idx] = 0.0  # pin goal throughout
 
-    def _gradient_descent(self, phi, start, end):
+    def _gradient_descent(self, phi, start, end, obstacle):
         """
         Steepest descent in internal (grid-index) coordinates.
         pos is stored as a list in grid order: [last_user_axis, ..., first_user_axis].
         Path is emitted in user order: (x, y, ...).
+
+        The boost leaves phi coarse (frozen wavefront bands), so descent can hit
+        flat plateaus a converged harmonic field would not have. On a stall,
+        relax further and re-trace from start. See the 2D variant.
         """
         ndim = phi.ndim
-        end_g = list(reversed(end))    # grid-order end coords
-        pos   = [float(c) for c in reversed(start)]  # grid-order position
+        end_g   = list(reversed(end))     # grid-order end coords
+        end_idx = tuple(reversed(end))    # grid index for end
 
-        # Raw continuous positions in user (x, y, ...) order — round only for
-        # visualization, never for smoothness metrics or reporting.
-        path = [tuple(reversed(pos))]
+        # Non-obstacle interior the Laplace solve may relax; goal pinned.
+        relaxable = ~obstacle
+        relaxable[end_idx] = False
 
-        for _ in range(10000):
-            if any(not (0 < pos[d] < phi.shape[d] - 1) for d in range(ndim)):
-                return None
+        relax_used = 0
+        while True:
+            pos = [float(c) for c in reversed(start)]  # grid-order position
 
-            if self.bilinear_interpolation:
-                grad = self._get_grad_nlinear(phi, pos)
-            else:
-                idx = [math.floor(p) for p in pos]
-                point_v = phi[tuple(idx)]
-                grad = []
+            # Raw continuous positions in user (x, y, ...) order — round only for
+            # visualization, never for smoothness metrics or reporting.
+            path = [tuple(reversed(pos))]
+            best_dist = math.inf
+            since_progress = 0
+            stalled = False
+
+            for _ in range(self._MAX_STEPS):
+                if any(not (0 < pos[d] < phi.shape[d] - 1) for d in range(ndim)):
+                    stalled = True  # walked off-grid; relax and retry
+                    break
+
+                if self.bilinear_interpolation:
+                    grad = self._get_grad_nlinear(phi, pos)
+                else:
+                    idx = [math.floor(p) for p in pos]
+                    point_v = phi[tuple(idx)]
+                    grad = []
+                    for d in range(ndim):
+                        idx_fwd = idx.copy(); idx_fwd[d] += 1
+                        idx_bwd = idx.copy(); idx_bwd[d] -= 1
+                        grad.append(
+                            self._fv(phi[tuple(idx_fwd)], point_v) -
+                            self._fv(phi[tuple(idx_bwd)], point_v)
+                        )
+
+                mag = math.sqrt(sum(g * g for g in grad))
+
+                if mag == 0 or since_progress >= self._STALL_WINDOW:
+                    stalled = True
+                    break
+
+                step = self.step_size / mag
                 for d in range(ndim):
-                    idx_fwd = idx.copy(); idx_fwd[d] += 1
-                    idx_bwd = idx.copy(); idx_bwd[d] -= 1
-                    grad.append(
-                        self._fv(phi[tuple(idx_fwd)], point_v) -
-                        self._fv(phi[tuple(idx_bwd)], point_v)
-                    )
+                    pos[d] -= step * grad[d]
 
-            mag = math.sqrt(sum(g * g for g in grad))
-            if mag == 0:
+                path.append(tuple(reversed(pos)))
+
+                dist = math.sqrt(sum((end_g[d] - pos[d]) ** 2 for d in range(ndim)))
+                if dist < best_dist - 1e-9:
+                    best_dist = dist
+                    since_progress = 0
+                else:
+                    since_progress += 1
+
+                if all(pos[d] - 1 <= end_g[d] <= pos[d] + 1 for d in range(ndim)):
+                    path.append(tuple(float(c) for c in end))
+                    return path
+
+            if not stalled:
                 return None
 
-            step = self.step_size / mag
-            for d in range(ndim):
-                pos[d] -= step * grad[d]
-
-            path.append(tuple(reversed(pos)))
-
-            if all(pos[d] - 1 <= end_g[d] <= pos[d] + 1 for d in range(ndim)):
-                path.append(tuple(float(c) for c in end))
-                return path
-
-        return None
+            if relax_used >= self._MAX_RELAX:
+                return None
+            for _ in range(self._RELAX_BATCH):
+                self._laplace_step(phi, relaxable, end_idx)
+            relax_used += self._RELAX_BATCH
 
     @staticmethod
     def _fv(nv, pv):

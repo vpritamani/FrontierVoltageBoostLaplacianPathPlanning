@@ -46,7 +46,7 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
             phi[free | obstacle] = v_max
 
         self._phi = phi
-        self._path = self._gradient_descent(phi, start, end)
+        self._path = self._gradient_descent(phi, start, end, obstacle)
 
         if visualize:
             self._visualize()
@@ -61,6 +61,12 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    # Interleaved-relaxation budget for _gradient_descent (see 2D variant).
+    _RELAX_BATCH = 500          # Laplace sweeps per stall
+    _MAX_RELAX = 60000          # total relaxation sweeps before giving up
+    _MAX_STEPS = 50000          # descent moves before giving up
+    _STALL_WINDOW = 2000        # descent moves without progress => relax
 
     def _build_masks(self, grid, ez, ey, ex):
         obstacle = grid == 1
@@ -91,53 +97,82 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
         phi[free] = new_phi[free]
         phi[ez, ey, ex] = 0.0  # pin goal throughout
 
-    def _gradient_descent(self, phi, start, end):
+    def _gradient_descent(self, phi, start, end, obstacle):
         sx, sy, sz = start
         ex, ey, ez = end
 
-        posz = float(sz)
-        posy = float(sy)
-        posx = float(sx)
+        # Non-obstacle interior the Laplace solve may relax; goal pinned.
+        # The boost leaves phi coarse (frozen wavefront bands), so descent can
+        # hit flat plateaus a converged harmonic field would not have. On a
+        # stall, relax further and re-trace from start. See the 2D variant.
+        relaxable = ~obstacle
+        relaxable[ez, ey, ex] = False
 
-        # Raw continuous positions — round only for visualization, never for
-        # smoothness metrics or reporting.
-        path = [(posx, posy, posz)]
+        relax_used = 0
+        while True:
+            posz = float(sz)
+            posy = float(sy)
+            posx = float(sx)
 
-        for _ in range(10000):
-            if not (0 < posz < phi.shape[0] - 1 and
-                    0 < posy < phi.shape[1] - 1 and
-                    0 < posx < phi.shape[2] - 1):
+            # Raw continuous positions — round only for visualization, never for
+            # smoothness metrics or reporting.
+            path = [(posx, posy, posz)]
+            best_dist = math.inf
+            since_progress = 0
+            stalled = False
+
+            for _ in range(self._MAX_STEPS):
+                if not (0 < posz < phi.shape[0] - 1 and
+                        0 < posy < phi.shape[1] - 1 and
+                        0 < posx < phi.shape[2] - 1):
+                    stalled = True  # walked off-grid; relax and retry
+                    break
+
+                if self.bilinear_interpolation:
+                    gradz, grady, gradx = self._get_grad_trilinear(phi, posz, posy, posx)
+                else:
+                    z = math.floor(posz)
+                    y = math.floor(posy)
+                    x = math.floor(posx)
+                    point_v = phi[z, y, x]
+                    gradz = self._fv(phi[z+1, y, x], point_v) - self._fv(phi[z-1, y, x], point_v)
+                    grady = self._fv(phi[z, y+1, x], point_v) - self._fv(phi[z, y-1, x], point_v)
+                    gradx = self._fv(phi[z, y, x+1], point_v) - self._fv(phi[z, y, x-1], point_v)
+
+                mag = math.sqrt(gradz**2 + grady**2 + gradx**2)
+
+                if mag == 0 or since_progress >= self._STALL_WINDOW:
+                    stalled = True
+                    break
+
+                step = self.step_size / mag
+                posz -= step * gradz
+                posy -= step * grady
+                posx -= step * gradx
+
+                path.append((posx, posy, posz))
+
+                dist = math.hypot(ex - posx, ey - posy, ez - posz)
+                if dist < best_dist - 1e-9:
+                    best_dist = dist
+                    since_progress = 0
+                else:
+                    since_progress += 1
+
+                if (posx - 1 <= ex <= posx + 1 and
+                        posy - 1 <= ey <= posy + 1 and
+                        posz - 1 <= ez <= posz + 1):
+                    path.append((float(ex), float(ey), float(ez)))
+                    return path
+
+            if not stalled:
                 return None
 
-            if self.bilinear_interpolation:
-                gradz, grady, gradx = self._get_grad_trilinear(phi, posz, posy, posx)
-            else:
-                z = math.floor(posz)
-                y = math.floor(posy)
-                x = math.floor(posx)
-                point_v = phi[z, y, x]
-                gradz = self._fv(phi[z+1, y, x], point_v) - self._fv(phi[z-1, y, x], point_v)
-                grady = self._fv(phi[z, y+1, x], point_v) - self._fv(phi[z, y-1, x], point_v)
-                gradx = self._fv(phi[z, y, x+1], point_v) - self._fv(phi[z, y, x-1], point_v)
-
-            mag = math.sqrt(gradz**2 + grady**2 + gradx**2)
-            if mag == 0:
+            if relax_used >= self._MAX_RELAX:
                 return None
-
-            step = self.step_size / mag
-            posz -= step * gradz
-            posy -= step * grady
-            posx -= step * gradx
-
-            path.append((posx, posy, posz))
-
-            if (posx - 1 <= ex <= posx + 1 and
-                    posy - 1 <= ey <= posy + 1 and
-                    posz - 1 <= ez <= posz + 1):
-                path.append((float(ex), float(ey), float(ez)))
-                return path
-
-        return None
+            for _ in range(self._RELAX_BATCH):
+                self._laplace_step(phi, relaxable, ez, ey, ex)
+            relax_used += self._RELAX_BATCH
 
     @staticmethod
     def _fv(nv, pv):

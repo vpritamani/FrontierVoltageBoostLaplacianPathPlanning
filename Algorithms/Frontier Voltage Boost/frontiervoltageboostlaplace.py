@@ -45,7 +45,7 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
             phi[free | obstacle] = v_max
 
         self._phi = phi
-        self._path = self._gradient_descent(phi, start, end)
+        self._path = self._gradient_descent(phi, start, end, obstacle)
 
         if visualize:
             self._visualize()
@@ -87,13 +87,30 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
         phi[free] = new_phi[free]
         phi[ey, ex] = 0.0  # pin goal throughout
 
-    def _gradient_descent(self, phi, start, end):
+    # Interleaved-relaxation budget for _gradient_descent (see below).
+    _RELAX_BATCH = 500          # Laplace sweeps per stall
+    _MAX_RELAX = 60000          # total relaxation sweeps before giving up
+    _MAX_STEPS = 50000          # descent moves before giving up
+    _STALL_WINDOW = 2000        # descent moves without progress => relax
+
+    def _gradient_descent(self, phi, start, end, obstacle):
         """
         Follow steepest descent of phi from start to end.
         floor_voltage caps each neighbour's contribution to ceil(current voltage),
         preventing the path from skipping over wavefront boundaries.
         When bilinear_interpolation is True, phi is sampled at continuous positions
         using bilinear interpolation instead of nearest-cell indexing.
+
+        The frontier-voltage boost produces a fast but *coarse* (under-relaxed)
+        field: solved cells are frozen the instant they cross the wavefront
+        threshold, so phi is a banded distance approximation rather than a
+        converged harmonic function. A true harmonic field has no interior
+        minima (maximum principle), but the coarse field does have flat
+        plateaus where the gradient vanishes. Rather than give up there, we
+        keep relaxing the whole interior (unfreezing the solved cells) and
+        retry — more Laplace averaging washes the plateau out and descent
+        continues. This trades a few thousand extra sweeps on hard maps for
+        never dead-ending; easy maps never stall and pay nothing.
 
         The returned path keeps the raw continuous (x, y) positions — this is
         where the smoothness advantage of the method lives. Round only for
@@ -102,39 +119,72 @@ class FrontierVoltageBoostLaplace(Algorithm2D):
         sx, sy = start
         ex, ey = end
 
-        posx = float(sx)
-        posy = float(sy)
+        # Everything the Laplace solve may relax: non-obstacle interior, goal pinned.
+        relaxable = ~obstacle
+        relaxable[ey, ex] = False
 
-        path = [(posx, posy)]
+        relax_used = 0
+        while True:
+            # One full trace attempt on the current field. If it stalls, we
+            # relax the field further and re-trace from the start, so the
+            # returned path is always the clean trace on the most-relaxed
+            # field rather than an accumulation of wandering.
+            posx = float(sx)
+            posy = float(sy)
+            path = [(posx, posy)]
+            best_dist = math.inf
+            since_progress = 0
+            stalled = False
 
-        for _ in range(10000):
-            if not (0 < posy < phi.shape[0] - 1 and 0 < posx < phi.shape[1] - 1):
+            for _ in range(self._MAX_STEPS):
+                if not (0 < posy < phi.shape[0] - 1 and 0 < posx < phi.shape[1] - 1):
+                    stalled = True  # walked off-grid; relax and retry
+                    break
+
+                if self.bilinear_interpolation:
+                    gradx, grady = self._get_grad_bilinear(phi, posx, posy)
+                else:
+                    y = math.floor(posy)
+                    x = math.floor(posx)
+                    point_v = phi[y, x]
+                    grady = self._fv(phi[y + 1, x], point_v) - self._fv(phi[y - 1, x], point_v)
+                    gradx = self._fv(phi[y, x + 1], point_v) - self._fv(phi[y, x - 1], point_v)
+
+                mag = math.sqrt(gradx ** 2 + grady ** 2)
+
+                # Stalled: exact-zero gradient (a capped plateau) or wandering
+                # with no progress toward the goal.
+                if mag == 0 or since_progress >= self._STALL_WINDOW:
+                    stalled = True
+                    break
+
+                step = self.step_size / mag
+                posx -= step * gradx
+                posy -= step * grady
+
+                path.append((posx, posy))
+
+                dist = math.hypot(ex - posx, ey - posy)
+                if dist < best_dist - 1e-9:
+                    best_dist = dist
+                    since_progress = 0
+                else:
+                    since_progress += 1
+
+                if posx - 1 <= ex <= posx + 1 and ey - 1 <= posy <= ey + 1:
+                    path.append((float(ex), float(ey)))
+                    return path
+
+            if not stalled:
+                return None  # exhausted step budget without stalling or arriving
+
+            # The field here isn't converged toward harmonic yet. Keep relaxing
+            # the whole interior (unfreezing solved cells) and re-trace.
+            if relax_used >= self._MAX_RELAX:
                 return None
-
-            if self.bilinear_interpolation:
-                gradx, grady = self._get_grad_bilinear(phi, posx, posy)
-            else:
-                y = math.floor(posy)
-                x = math.floor(posx)
-                point_v = phi[y, x]
-                grady = self._fv(phi[y + 1, x], point_v) - self._fv(phi[y - 1, x], point_v)
-                gradx = self._fv(phi[y, x + 1], point_v) - self._fv(phi[y, x - 1], point_v)
-
-            mag = math.sqrt(gradx ** 2 + grady ** 2)
-            if mag == 0:
-                return None
-
-            step = self.step_size / mag
-            posx -= step * gradx
-            posy -= step * grady
-
-            path.append((posx, posy))
-
-            if posx - 1 <= ex <= posx + 1 and ey - 1 <= posy <= ey + 1:
-                path.append((float(ex), float(ey)))
-                return path
-
-        return None
+            for _ in range(self._RELAX_BATCH):
+                self._laplace_step(phi, relaxable, ey, ex)
+            relax_used += self._RELAX_BATCH
 
     @staticmethod
     def _bilinear_interp(phi, x, y):
