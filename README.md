@@ -74,6 +74,29 @@ Full argument reference: see [Test Suite/README.md](Test%20Suite/README.md).
 
 ---
 
+## 5. Run Potential Field (2D Baseline)
+
+```bash
+python "Test Suite/run_test_suite_potential_field.py" `
+    --maps_dir "Test Suite/output/2d_maps"
+```
+
+Results are written to `Test Suite/output/2d_maps/pf_results/`.
+
+**Algorithm parameters:**
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--maps_dir` | yes | — | Folder containing `.npy` files and `start_end_points.csv` |
+| `--q_star` | no | `30` | Influence radius for repulsive obstacles |
+| `--k_att` | no | `1.0` | Attractive potential gain |
+| `--k_rep` | no | `10000` | Repulsive potential gain |
+| `--step_size` | no | `1.0` | Gradient descent step size |
+| `--max_iters` | no | `10000` | Maximum gradient-descent iterations |
+| `--output` | no | all | Space-separated: `maps`, `paths`, `phi` |
+
+---
+
 ## Project Structure
 
 ```
@@ -84,7 +107,7 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   ├── 3dalgorithm.py            # Algorithm3D  (3D-specific base)
 │   ├── Baseline Algorithms/
 │   │   ├── astar.py              # AStarAlgorithm (dimension-agnostic)
-│   │   └── potentialfield.py
+│   │   └── potentialfield2d.py   # PotentialFieldAlgorithm (2D)
 │   ├── Frontier Voltage Boost/
 │   │   ├── frontiervoltageboostlaplace.py
 │   │   └── 3dfrontiervoltageboostlaplace.py
@@ -105,6 +128,7 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   ├── init_test_suite.py        # Map generation script
 │   ├── run_test_suite_frontier_voltage_boost_laplace.py
 │   ├── run_test_suite_frontier_voltage_boost_laplace_3d.py
+│   ├── run_test_suite_potential_field.py
 │   └── main.py                   # Full benchmark runner
 │   └── output/                   # legacy CLI map output (importable in the app)
 ├── benchmark_app/                # local web app (Flask + vanilla JS)
@@ -128,7 +152,8 @@ FrontierVoltageBoostLaplacianPathPlanning/
 ```
 BaseAlgorithm  (algorithm.py)
 ├── Algorithm2D  (2dalgorithm.py)        — for algorithms that only work in 2D
-│   └── FrontierVoltageBoostLaplace
+│   ├── FrontierVoltageBoostLaplace
+│   └── PotentialFieldAlgorithm  (potentialfield2d.py)
 ├── Algorithm3D  (3dalgorithm.py)        — for algorithms that only work in 3D
 │   └── FrontierVoltageBoostLaplace3D
 └── AStarAlgorithm  (astar.py)           — dimension-agnostic, reads grid.ndim at solve time
