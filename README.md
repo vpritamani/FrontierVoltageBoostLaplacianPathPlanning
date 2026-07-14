@@ -12,7 +12,7 @@ From the project root, run these two commands once:
 
 ```bash
 pip install -e .
-pip install numpy pillow flask
+pip install numpy scipy pillow flask
 ```
 
 `pip install -e .` registers `Algorithms`, `map_generation`, and `smoothness_metrics` on your Python path so all imports work without any manual path setup. You only need to do this once per environment.
@@ -49,51 +49,7 @@ Each solve executes in a watchdog subprocess with a configurable timeout, so an 
 
 ## 3. Importing maps from the old CLI scripts
 
-The old CLI scripts (`init_test_suite.py`, `run_test_suite_frontier_voltage_boost_laplace.py`) are retired — the app covers everything they did. Folders they produced (e.g. `Test Suite/output/2d_maps` with `.npy` files + `start_end_points.csv`) can be pulled into the app via **Map Sets → Import from folder…**; the files are copied, the source folder is untouched.
-
----
-
-## 4. Run 3D Frontier Voltage Boost Laplace
-
-Generate 3D maps first, then point the 3D runner at them:
-
-```bash
-# Generate 3D maps
-python "Test Suite/init_test_suite.py" -dims 3 -num_maps 3 -xdim 30 -ydim 30 -zdim 30 --output npy
-
-# Run the 3D algorithm
-python "Test Suite/run_test_suite_frontier_voltage_boost_laplace_3d.py" `
-    --maps_dir "Test Suite/output/3d_maps" `
-    --laplace_iters 200 `
-    --epsilon 0.0001
-```
-
-Results are written to `Test Suite/output/3d_maps/fvb_results/<map_name>/` as per-z-slice PNGs.
-
-Full argument reference: see [Test Suite/README.md](Test%20Suite/README.md).
-
----
-
-## 5. Run Potential Field (2D Baseline)
-
-```bash
-python "Test Suite/run_test_suite_potential_field.py" `
-    --maps_dir "Test Suite/output/2d_maps"
-```
-
-Results are written to `Test Suite/output/2d_maps/pf_results/`.
-
-**Algorithm parameters:**
-
-| Argument | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `--maps_dir` | yes | — | Folder containing `.npy` files and `start_end_points.csv` |
-| `--q_star` | no | `30` | Influence radius for repulsive obstacles |
-| `--k_att` | no | `1.0` | Attractive potential gain |
-| `--k_rep` | no | `10000` | Repulsive potential gain |
-| `--step_size` | no | `1.0` | Gradient descent step size |
-| `--max_iters` | no | `10000` | Maximum gradient-descent iterations |
-| `--output` | no | all | Space-separated: `maps`, `paths`, `phi` |
+The old CLI scripts are retired — the app covers everything they did, for every algorithm and dimensionality. Folders they produced (e.g. `Test Suite/output/2d_maps` with `.npy` files + `start_end_points.csv`) can be pulled into the app via **Map Sets → Import from folder…**; the files are copied, the source folder is untouched.
 
 ---
 
@@ -107,10 +63,12 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   ├── 3dalgorithm.py            # Algorithm3D  (3D-specific base)
 │   ├── Baseline Algorithms/
 │   │   ├── astar.py              # AStarAlgorithm (dimension-agnostic)
-│   │   └── potentialfield2d.py   # PotentialFieldAlgorithm (2D)
+│   │   ├── potentialfield2d.py   # PotentialFieldAlgorithm (2D)
+│   │   └── rrt.py                # RRTAlgorithm (dimension-agnostic)
 │   ├── Frontier Voltage Boost/
 │   │   ├── frontiervoltageboostlaplace.py
-│   │   └── 3dfrontiervoltageboostlaplace.py
+│   │   ├── 3dfrontiervoltageboostlaplace.py
+│   │   └── ndfrontiervoltageboostlaplace.py
 │   └── Incremental Algorithms/
 │       ├── rrtlaplacefrontier.py
 │       └── rrtlaplacerandomsampling.py
@@ -125,11 +83,6 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   ├── steering_penalty.py       # recommended metric
 │   └── ...                       # one file per metric
 ├── Test Suite/
-│   ├── init_test_suite.py        # Map generation script
-│   ├── run_test_suite_frontier_voltage_boost_laplace.py
-│   ├── run_test_suite_frontier_voltage_boost_laplace_3d.py
-│   ├── run_test_suite_potential_field.py
-│   └── main.py                   # Full benchmark runner
 │   └── output/                   # legacy CLI map output (importable in the app)
 ├── benchmark_app/                # local web app (Flask + vanilla JS)
 │   ├── registry.py               # ← add new algorithms here
@@ -156,7 +109,9 @@ BaseAlgorithm  (algorithm.py)
 │   └── PotentialFieldAlgorithm  (potentialfield2d.py)
 ├── Algorithm3D  (3dalgorithm.py)        — for algorithms that only work in 3D
 │   └── FrontierVoltageBoostLaplace3D
-└── AStarAlgorithm  (astar.py)           — dimension-agnostic, reads grid.ndim at solve time
+├── FrontierVoltageBoostLaplaceND  (ndfrontiervoltageboostlaplace.py) — any dimensionality
+├── AStarAlgorithm  (astar.py)           — dimension-agnostic, reads grid.ndim at solve time
+└── RRTAlgorithm  (rrt.py)               — dimension-agnostic, continuous (decimal) node positions
 ```
 
 New algorithms extend `Algorithm2D`, `Algorithm3D`, or `BaseAlgorithm` directly depending on whether they are dimension-specific.

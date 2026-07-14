@@ -1,33 +1,48 @@
 import math
 
 import numpy as np
-from scipy.signal import convolve2d
+from scipy.ndimage import distance_transform_edt
 
 from Algorithms import Algorithm2D
 
-_KERNEL_CACHE = {}
-
-# Default algorithm parameters — override via constructor or CLI.
-DEFAULT_Q_STAR = 30
-DEFAULT_K_ATT = 1.0
-DEFAULT_K_REP = 1e4
-DEFAULT_STEP_SIZE = 1.0
-DEFAULT_MAX_ITERS = 10000
-
 
 class PotentialFieldAlgorithm(Algorithm2D):
-    """Artificial potential field planner with attractive and repulsive terms."""
+    """Classic artificial potential field (APF) planner — 2D baseline.
+
+    The potential is the textbook formulation:
+
+    * attractive:  U_att = 0.5 · k_att · d(goal)²
+    * repulsive:   U_rep = 0.5 · k_rep · (1/d − 1/q*)²  for d < q*, else 0,
+      where d is the Euclidean distance to the *nearest* obstacle
+      (computed exactly with a distance transform).
+
+    Gradient descent follows the steepest descent of U_att + U_rep from start
+    to goal. When ``bilinear_interpolation`` is True (default) the field is
+    sampled at continuous positions via bilinear interpolation — the same
+    option the Frontier Voltage Boost Laplace planner exposes; when False the
+    gradient uses nearest-cell central differences. The returned path keeps
+    the raw decimal (x, y) positions — round only for pixel-level
+    visualization, never for metrics.
+
+    Like any APF planner it can stall in local minima (a balance point between
+    attraction and repulsion makes the descent oscillate in place). This is
+    detected — no progress toward the goal for ``stall_window`` consecutive
+    steps — and reported honestly by returning ``None`` (map unsolved), as is
+    leaving the grid or entering an obstacle cell.
+    """
 
     OBSTACLE_POTENTIAL = 1e6
 
     def __init__(
         self,
         map,
-        q_star: int = DEFAULT_Q_STAR,
-        k_att: float = DEFAULT_K_ATT,
-        k_rep: float = DEFAULT_K_REP,
-        step_size: float = DEFAULT_STEP_SIZE,
-        max_iters: int = DEFAULT_MAX_ITERS,
+        q_star: float = 30.0,
+        k_att: float = 1.0,
+        k_rep: float = 1e4,
+        step_size: float = 1.0,
+        max_iters: int = 10000,
+        stall_window: int = 100,
+        bilinear_interpolation: bool = True,
     ):
         super().__init__(map)
         self.q_star = q_star
@@ -35,6 +50,8 @@ class PotentialFieldAlgorithm(Algorithm2D):
         self.k_rep = k_rep
         self.step_size = step_size
         self.max_iters = max_iters
+        self.stall_window = stall_window
+        self.bilinear_interpolation = bilinear_interpolation
         self._path = None
         self._potential = None
 
@@ -47,8 +64,8 @@ class PotentialFieldAlgorithm(Algorithm2D):
         start = self.map.start  # (x, y)
         end = self.map.end      # (x, y)
 
-        self._potential = self._compute_potential(grid, end[1], end[0])
-        self._path = self._gradient_descent(self._potential, start, end)
+        self._potential = self._compute_potential(grid, end)
+        self._path = self._gradient_descent(self._potential, grid, start, end)
 
         if visualize:
             self._visualize()
@@ -64,123 +81,108 @@ class PotentialFieldAlgorithm(Algorithm2D):
     # Potential field
     # ------------------------------------------------------------------
 
-    def _compute_potential(self, grid, goal_y, goal_x):
+    def _compute_potential(self, grid, goal):
+        gx, gy = goal
         rows, cols = grid.shape
-        gy, gx = np.meshgrid(np.arange(rows), np.arange(cols), indexing='ij')
-        u_att = 0.5 * self.k_att * (
-            (gy - goal_y) ** 2 + (gx - goal_x) ** 2
-        ).astype(float)
+        yy, xx = np.meshgrid(np.arange(rows), np.arange(cols), indexing='ij')
 
-        obs_map = (grid == 1).astype(float)
-        kernel = self._repulsive_kernel(self.q_star, self.k_rep)
-        u_rep = convolve2d(obs_map, kernel, mode='same', boundary='fill', fillvalue=0)
-        u_rep[obs_map > 0.5] = self.OBSTACLE_POTENTIAL
+        u_att = 0.5 * self.k_att * ((yy - gy) ** 2 + (xx - gx) ** 2).astype(float)
+
+        # Euclidean distance from every free cell to its nearest obstacle cell.
+        obstacle = grid == 1
+        dist = distance_transform_edt(~obstacle)
+
+        u_rep = np.zeros_like(u_att)
+        near = (dist < self.q_star) & (dist > 0)
+        u_rep[near] = 0.5 * self.k_rep * (1.0 / dist[near] - 1.0 / self.q_star) ** 2
+        u_rep[obstacle] = self.OBSTACLE_POTENTIAL
 
         return u_att + u_rep
-
-    @classmethod
-    def _repulsive_kernel(cls, q_star, k_rep):
-        key = (int(q_star), float(k_rep))
-        kernel = _KERNEL_CACHE.get(key)
-        if kernel is None:
-            ys, xs = np.mgrid[-q_star:q_star + 1, -q_star:q_star + 1]
-            d = np.sqrt(xs ** 2 + ys ** 2)
-            kernel = np.zeros_like(d, dtype=float)
-            mask = (d < q_star) & (d >= 1e-6)
-            inv_d = np.zeros_like(d, dtype=float)
-            inv_d[mask] = 1.0 / d[mask]
-            kernel[mask] = 0.5 * k_rep * (inv_d[mask] - 1.0 / q_star) ** 2
-            _KERNEL_CACHE[key] = kernel
-        return kernel
 
     # ------------------------------------------------------------------
     # Gradient descent
     # ------------------------------------------------------------------
 
-    def _gradient_descent(self, potential, start, end):
-        """
-        Follow steepest descent of the potential field from start to end.
-
-        The gradient is evaluated at the current continuous position using
-        bilinear interpolation of the potential (rather than nearest-cell
-        indexing), so the descent is not quantised to the grid. This mirrors
-        the bilinear gradient used in the frontier voltage boost Laplace
-        implementation.
-        """
+    def _gradient_descent(self, potential, grid, start, end):
         sx, sy = start
         ex, ey = end
 
-        posr = float(sy)  # current row (y)
-        posc = float(sx)  # current col (x)
-        path = [(round(posc), round(posr))]
+        posx = float(sx)
+        posy = float(sy)
+
+        # Raw continuous positions — round only for visualization.
+        path = [(posx, posy)]
+
+        # Local-minimum detection: give up when the distance to the goal has
+        # not improved for `stall_window` consecutive steps (oscillation at a
+        # balance point between attraction and repulsion).
+        best_goal_dist = math.hypot(ex - posx, ey - posy)
+        steps_since_best = 0
 
         for _ in range(self.max_iters):
-            if not (1 <= posr < potential.shape[0] - 1 and 1 <= posc < potential.shape[1] - 1):
+            if not (1 <= posy < potential.shape[0] - 1 and
+                    1 <= posx < potential.shape[1] - 1):
                 return None
 
-            gradr, gradc = self._get_grad_bilinear(potential, posr, posc)
-            maggrad = math.hypot(gradr, gradc)
+            if self.bilinear_interpolation:
+                gradx, grady = self._get_grad_bilinear(potential, posx, posy)
+            else:
+                y = math.floor(posy)
+                x = math.floor(posx)
+                grady = potential[y + 1, x] - potential[y - 1, x]
+                gradx = potential[y, x + 1] - potential[y, x - 1]
+            mag = math.hypot(gradx, grady)
+            if mag == 0:
+                return None   # exact local minimum
 
-            if maggrad == 0:
+            posx -= (self.step_size / mag) * gradx
+            posy -= (self.step_size / mag) * grady
+
+            if not (0 <= posy < potential.shape[0] and 0 <= posx < potential.shape[1]):
                 return None
+            if grid[int(posy), int(posx)] == 1:
+                return None   # descended into an obstacle cell
 
-            posr -= (self.step_size / maggrad) * gradr
-            posc -= (self.step_size / maggrad) * gradc
+            path.append((posx, posy))
 
-            if not (0 <= posr < potential.shape[0] and 0 <= posc < potential.shape[1]):
-                return None
-
-            if self._bilinear_interp(potential, posr, posc) >= self.OBSTACLE_POTENTIAL:
-                return None
-
-            path.append((round(posc), round(posr)))
-
-            if abs(ey - posr) <= 1 and abs(ex - posc) <= 1:
-                path.append((ex, ey))
+            if abs(ex - posx) <= 1 and abs(ey - posy) <= 1:
+                path.append((float(ex), float(ey)))
                 return path
+
+            goal_dist = math.hypot(ex - posx, ey - posy)
+            if goal_dist < best_goal_dist - 1e-6:
+                best_goal_dist = goal_dist
+                steps_since_best = 0
+            else:
+                steps_since_best += 1
+                if steps_since_best >= self.stall_window:
+                    return None   # oscillating in a local minimum
 
         return None
 
-    def _get_grad_bilinear(self, potential, posr, posc):
-        """Central-difference gradient with each sample taken via bilinear interpolation."""
-        point_v = self._bilinear_interp(potential, posr, posc)
-        gradr = (
-            self._fv(point_v, self._bilinear_interp(potential, posr + 1, posc))
-            - self._fv(point_v, self._bilinear_interp(potential, posr - 1, posc))
-        )
-        gradc = (
-            self._fv(point_v, self._bilinear_interp(potential, posr, posc + 1))
-            - self._fv(point_v, self._bilinear_interp(potential, posr, posc - 1))
-        )
-        return gradr, gradc
+    def _get_grad_bilinear(self, potential, posx, posy):
+        """Central-difference gradient of the bilinearly interpolated potential."""
+        gradx = (self._bilinear_interp(potential, posx + 1, posy) -
+                 self._bilinear_interp(potential, posx - 1, posy))
+        grady = (self._bilinear_interp(potential, posx, posy + 1) -
+                 self._bilinear_interp(potential, posx, posy - 1))
+        return gradx, grady
 
     @staticmethod
-    def _fv(point_voltage, neighbor_voltage):
-        return min(neighbor_voltage, math.ceil(point_voltage))
-
-    @staticmethod
-    def _bilinear_interp(grid, y, x):
-        y0 = int(math.floor(y))
-        x0 = int(math.floor(x))
-        y0 = max(0, min(grid.shape[0] - 1, y0))
-        x0 = max(0, min(grid.shape[1] - 1, x0))
-        y1 = min(y0 + 1, grid.shape[0] - 1)
-        x1 = min(x0 + 1, grid.shape[1] - 1)
-
-        dy = y - y0
-        dx = x - x0
-
-        v00 = grid[y0, x0]
-        v10 = grid[y1, x0]
-        v01 = grid[y0, x1]
-        v11 = grid[y1, x1]
-
-        return (
-            v00 * (1 - dy) * (1 - dx)
-            + v10 * dy * (1 - dx)
-            + v01 * (1 - dy) * dx
-            + v11 * dy * dx
-        )
+    def _bilinear_interp(field, x, y):
+        """Sample field at continuous (x, y); field is indexed field[y, x]."""
+        y0, x0 = math.floor(y), math.floor(x)
+        y1, x1 = y0 + 1, x0 + 1
+        y0 = max(0, min(y0, field.shape[0] - 1))
+        y1 = max(0, min(y1, field.shape[0] - 1))
+        x0 = max(0, min(x0, field.shape[1] - 1))
+        x1 = max(0, min(x1, field.shape[1] - 1))
+        dy = y - math.floor(y)
+        dx = x - math.floor(x)
+        return (  (1 - dy) * (1 - dx) * field[y0, x0]
+                + (1 - dy) *      dx  * field[y0, x1]
+                +      dy  * (1 - dx) * field[y1, x0]
+                +      dy  *      dx  * field[y1, x1])
 
     # ------------------------------------------------------------------
     # Visualization
@@ -193,9 +195,11 @@ class PotentialFieldAlgorithm(Algorithm2D):
         rgb = np.stack([grey, grey, grey], axis=2).copy()
 
         if self._path:
+            # Path coords are continuous — round only for pixel painting.
             for x, y in self._path:
-                if 0 <= y < rgb.shape[0] and 0 <= x < rgb.shape[1]:
-                    rgb[y, x] = [128, 128, 255]
+                xi, yi = int(round(x)), int(round(y))
+                if 0 <= yi < rgb.shape[0] and 0 <= xi < rgb.shape[1]:
+                    rgb[yi, xi] = [128, 128, 255]
 
         sx, sy = self.map.start
         ex, ey = self.map.end
