@@ -4,6 +4,7 @@
 
 const S = {
   registry: [],
+  system: { cpu_count: 1, torch: false, cuda: false, cuda_device: null },
   mapSets: [],
   runs: [],
   jobs: [],
@@ -25,8 +26,7 @@ const F = {
   addForm: null,                    // {id, params} being configured
   runName: '',
   timeout: 120,
-  theta: 30,
-  sweep: 5,
+  workers: 1,                       // parallel solves (each in its own subprocess)
 };
 
 const METRIC_OPTIONS = [
@@ -125,6 +125,13 @@ function paramsSummary(params) {
 /* Instance key of a result record or manifest algorithm entry (back-compat). */
 function recKey(r) { return r.algorithm_key || r.algorithm_id; }
 function algoKey(a) { return a.key || a.id; }
+
+function systemLine() {
+  const s = S.system;
+  if (s.cuda) return `GPU: ${s.cuda_device} available — “Use GPU (PyTorch)” options run on CUDA.`;
+  if (s.torch) return 'No CUDA GPU detected — “Use GPU (PyTorch)” options run on CPU via PyTorch.';
+  return 'PyTorch not installed — runs with “Use GPU (PyTorch)” ticked will fail (pip install torch).';
+}
 
 /* Instance display label — always states the hyperparameters. */
 function instLabel(algorithms, entry) {
@@ -278,12 +285,22 @@ function renderRunTab() {
           <input type="number" id="run-timeout" value="${F.timeout}" min="5" step="5">
           <span class="hint">Hard kill per (map, algorithm)</span>
         </div>
+        <div class="field">
+          <label>Parallel workers</label>
+          <input type="number" id="run-workers" value="${F.workers}" min="1" max="${Math.max(1, S.system.cpu_count)}" step="1">
+          <span class="hint">of ${S.system.cpu_count} CPU cores</span>
+        </div>
         <button class="btn btn-primary" id="start-run">Start run</button>
       </div>
       <p class="hint" style="color:var(--muted);font-size:12px;margin:8px 0 0">
-        Solved paths are stored with the run — smoothness metric hyperparameters
-        (steering θ, sweep) are chosen later in Results / Compare and can be changed
-        anytime without re-running the planners.
+        ${esc(systemLine())}
+      </p>
+      <p class="hint" style="color:var(--muted);font-size:12px;margin:4px 0 0">
+        Parallel workers run (map, algorithm) cells concurrently — each still in its own
+        watchdog subprocess. Concurrent solves share the CPU, so wall-clock timings can be
+        inflated; use 1 worker for the fairest timing comparisons.
+        Solved paths are stored with the run — smoothness hyperparameters (steering θ, sweep)
+        are chosen later in Results / Compare without re-running the planners.
       </p>
       <div id="run-msg" style="margin-top:10px"></div>
     </div>`;
@@ -293,6 +310,7 @@ function renderRunTab() {
   }));
   $('#run-name').addEventListener('input', e => { F.runName = e.target.value; });
   $('#run-timeout').addEventListener('input', e => { F.timeout = Number(e.target.value); });
+  $('#run-workers').addEventListener('input', e => { F.workers = Number(e.target.value); });
   $('#start-run').addEventListener('click', startRun);
 
   renderMapsConfig();
@@ -514,6 +532,7 @@ async function startRun() {
     const body = {
       name: F.runName || null,
       solve_timeout_s: F.timeout,
+      parallel_workers: Math.max(1, F.workers || 1),
       algorithms: algos,
     };
     if (F.source === 'new') {
@@ -863,6 +882,7 @@ function renderRunDetail() {
       <div class="meta-line">
         ${esc(d.created)} · map set: ${esc(d.map_set_name || d.map_set_id || '(generating)')}${d.map_set_exists ? '' : ' (deleted)'}
         · ${d.dims ? d.dims + 'D' : ''} · timeout ${fmt(d.solve_timeout_s, 0)}s
+        ${(d.parallel_workers || 1) > 1 ? `· ${d.parallel_workers} workers` : ''}
         · metrics: θ=${fmt(mp.steering_theta_degrees, 0)}° sweep=${fmt(mp.steering_sweep_range, 0)}${previewOn ? ' (preview)' : ''}
         ${d.error ? `<br><span style="color:var(--status-critical)">error: ${esc(String(d.error).slice(0, 300))}</span>` : ''}
       </div>
@@ -1062,6 +1082,7 @@ function prefillFromRun(d) {
   F.addForm = null;
   F.runName = d.name + ' (re-run)';
   F.timeout = d.solve_timeout_s || 120;
+  F.workers = d.parallel_workers || 1;
   switchTab('run');
 }
 
@@ -2096,7 +2117,7 @@ function mountViewerND(mount, ms, entry, pathSpecs, grid) {
 
 (async function init() {
   try {
-    S.registry = await api('/api/registry');
+    [S.registry, S.system] = await Promise.all([api('/api/registry'), api('/api/system')]);
     await refreshLists();
     // Sensible default: one instance of each algorithm that supports 2D.
     if (!F.algoList.length) {

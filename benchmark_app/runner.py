@@ -146,6 +146,7 @@ def enqueue_run(config: dict, map_set_from_job: str | None = None) -> dict:
             for i, a in enumerate(config['algorithms'])
         ],
         'solve_timeout_s': float(config.get('solve_timeout_s') or 120.0),
+        'parallel_workers': max(1, int(config.get('parallel_workers') or 1)),
         'metric_params': metric_params,
         'gen_job_id': map_set_from_job,
         'summary': None,
@@ -411,6 +412,15 @@ def _execute_run(job: dict):
                 raise RuntimeError(
                     f"{algo['label']} does not support {ms['dims']}D maps")
 
+        # 'Use GPU' needs PyTorch (CUDA is used when available, CPU otherwise).
+        if any((a.get('params') or {}).get('use_gpu') for a in manifest['algorithms']):
+            try:
+                import torch  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "'Use GPU' requested but PyTorch is not installed — "
+                    "run `pip install torch` or untick Use GPU.")
+
         wanted = manifest.get('map_names')
         maps = [m for m in ms['maps'] if not wanted or m['name'] in wanted]
         if not maps:
@@ -420,68 +430,112 @@ def _execute_run(job: dict):
         manifest['status'] = 'running'
         storage.save_run_manifest(manifest)
 
-        total = len(maps) * len(manifest['algorithms'])
-        done = 0
-        results = []
+        workers = max(1, int(manifest.get('parallel_workers') or 1))
         timeout_s = manifest['solve_timeout_s']
         metric_params = manifest.get('metric_params') or DEFAULT_METRIC_PARAMS
 
-        for m in maps:
-            grid = storage.load_map_grid(ms['id'], m['name'])
+        # One cell per (map, algorithm-instance). With workers > 1, cells run
+        # concurrently — each solve still gets its own watchdog subprocess, so
+        # per-solve timeouts and cancellation behave exactly as in serial mode.
+        cells = [(m, algo) for m in maps for algo in manifest['algorithms']]
+        total = len(cells)
+        grids = {m['name']: storage.load_map_grid(ms['id'], m['name']) for m in maps}
+        result_slots: list = [None] * total
+        progress = {'done': 0}
+        res_lock = threading.Lock()
+        worker_note = f' · {workers} workers' if workers > 1 else ''
+
+        def compact_results():
+            return [r for r in result_slots if r is not None]
+
+        def solve_cell(i):
+            m, algo = cells[i]
+            check_cancel()
+            key = _algo_key(algo)
+            grid = grids[m['name']]
             start, end = tuple(m['start']), tuple(m['end'])
 
-            for algo in manifest['algorithms']:
-                check_cancel()
-                key = _algo_key(algo)
-                _set_progress(job, done, total, f"{m['name']} · {algo['label']}")
+            outcome = solve_with_timeout(
+                algo['id'], algo['params'], grid, start, end, timeout_s,
+                cancel_event=cancel_ev,
+            )
+            if outcome.get('cancelled'):
+                raise _Cancelled()
 
-                outcome = solve_with_timeout(
-                    algo['id'], algo['params'], grid, start, end, timeout_s,
-                    cancel_event=cancel_ev,
-                )
-                if outcome.get('cancelled'):
-                    finish_cancelled(results)
+            record = {
+                'run_id': run_id,
+                'run_name': manifest['name'],
+                'timestamp': datetime.now().isoformat(timespec='seconds'),
+                'map_set_id': ms['id'],
+                'map_name': m['name'],
+                'map_stem': m['stem'],
+                'dims': ms['dims'],
+                'algorithm_key': key,
+                'algorithm_id': algo['id'],
+                'algorithm_label': algo['label'],
+                'params': algo['params'],
+                'solved': outcome['solved'],
+                'error': outcome['error'],
+                'time_s': outcome['time_s'],
+                'path_steps': None,
+                'path_length_euclidean': None,
+                'metrics': None,
+                'has_image': False,
+            }
+
+            if outcome['solved']:
+                path = outcome['path']
+                record['path_steps'] = len(path)
+                record['path_length_euclidean'] = _euclidean_length(path)
+                record['metrics'] = SmoothnessMetrics(path, **metric_params).compute_all()
+                storage.save_path_json(run_id, key, m['stem'], path)
+                if ms['dims'] == 2:
+                    _render_path_image(
+                        storage.image_path(run_id, key, m['stem']),
+                        grid, path, start, end,
+                    )
+                    record['has_image'] = True
+
+            with res_lock:
+                result_slots[i] = record
+                progress['done'] += 1
+                _set_progress(job, progress['done'], total,
+                              f"{m['name']} · {algo['label']}{worker_note}")
+                storage.save_run_results(run_id, compact_results())  # persist incrementally
+
+        try:
+            if workers == 1:
+                for i in range(total):
+                    solve_cell(i)
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+                cancelled = False
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = [pool.submit(solve_cell, i) for i in range(total)]
+                    first_error = None
+                    for f in futures:
+                        try:
+                            f.result()
+                        except _Cancelled:
+                            cancelled = True
+                            if cancel_ev is not None:
+                                cancel_ev.set()   # drain remaining cells quickly
+                        except Exception as exc:
+                            if first_error is None:
+                                first_error = exc
+                            if cancel_ev is not None:
+                                cancel_ev.set()
+                # A real error may drain remaining cells via the cancel event —
+                # classify by the error first, cancellation second.
+                if first_error is not None:
+                    raise first_error
+                if cancelled:
                     raise _Cancelled()
+        except _Cancelled:
+            finish_cancelled(compact_results())
+            raise
 
-                record = {
-                    'run_id': run_id,
-                    'run_name': manifest['name'],
-                    'timestamp': datetime.now().isoformat(timespec='seconds'),
-                    'map_set_id': ms['id'],
-                    'map_name': m['name'],
-                    'map_stem': m['stem'],
-                    'dims': ms['dims'],
-                    'algorithm_key': key,
-                    'algorithm_id': algo['id'],
-                    'algorithm_label': algo['label'],
-                    'params': algo['params'],
-                    'solved': outcome['solved'],
-                    'error': outcome['error'],
-                    'time_s': outcome['time_s'],
-                    'path_steps': None,
-                    'path_length_euclidean': None,
-                    'metrics': None,
-                    'has_image': False,
-                }
-
-                if outcome['solved']:
-                    path = outcome['path']
-                    record['path_steps'] = len(path)
-                    record['path_length_euclidean'] = _euclidean_length(path)
-                    record['metrics'] = SmoothnessMetrics(path, **metric_params).compute_all()
-                    storage.save_path_json(run_id, key, m['stem'], path)
-                    if ms['dims'] == 2:
-                        _render_path_image(
-                            storage.image_path(run_id, key, m['stem']),
-                            grid, path, start, end,
-                        )
-                        record['has_image'] = True
-
-                results.append(record)
-                done += 1
-                _set_progress(job, done, total, f"{m['name']} · {algo['label']}")
-                storage.save_run_results(run_id, results)  # persist incrementally
-
+        results = compact_results()
         storage.write_results_csv(run_id, results, SmoothnessMetrics.METRIC_KEYS)
         manifest['status'] = 'done'
         manifest['summary'] = _summarize(manifest['algorithms'], results)

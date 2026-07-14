@@ -17,12 +17,13 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
     """
 
     def __init__(self, map, n_l: int, epsilon: float, step_size: float = 1.0,
-                 bilinear_interpolation: bool = True):
+                 bilinear_interpolation: bool = True, use_gpu: bool = False):
         super().__init__(map)
         self.n_l = n_l
         self.epsilon = epsilon
         self.step_size = step_size
         self.bilinear_interpolation = bilinear_interpolation
+        self.use_gpu = use_gpu   # PyTorch wavefront solve (CUDA when available)
         self._path = None
         self._phi = None
 
@@ -35,6 +36,24 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
         start = self.map.start   # (x, y, ...) user coords
         end   = self.map.end     # (x, y, ...) user coords
 
+        if self.use_gpu:
+            phi = self._solve_phi_torch(grid, start, end)
+        else:
+            phi = self._solve_phi(grid, start, end)
+
+        self._phi = phi
+        self._path = self._gradient_descent(phi, start, end)
+
+        if visualize:
+            self._visualize()
+
+        return self._path
+
+    # ------------------------------------------------------------------
+    # Wavefront potential solve — CPU (NumPy, default)
+    # ------------------------------------------------------------------
+
+    def _solve_phi(self, grid, start, end):
         end_idx   = tuple(reversed(end))    # grid index for end
         start_idx = tuple(reversed(start))  # grid index for start
 
@@ -56,13 +75,66 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
             v_max += 1.0
             phi[free | obstacle] = v_max
 
-        self._phi = phi
-        self._path = self._gradient_descent(phi, start, end)
+        return phi
 
-        if visualize:
-            self._visualize()
+    # ------------------------------------------------------------------
+    # Wavefront potential solve — PyTorch (CUDA when available)
+    # ------------------------------------------------------------------
 
-        return self._path
+    @staticmethod
+    def _edge_pad_torch(t):
+        """Pad every dim by 1 with edge replication (works for any ndim,
+        unlike F.pad's 'replicate' which stops at 3 spatial dims)."""
+        import torch
+        for d in range(t.ndim):
+            first = t.narrow(d, 0, 1)
+            last = t.narrow(d, t.size(d) - 1, 1)
+            t = torch.cat([first, t, last], dim=d)
+        return t
+
+    def _solve_phi_torch(self, grid, start, end):
+        """Identical wavefront/boost logic; the 2·ndim face-neighbour average
+        is computed with shifted tensor slices on the torch device."""
+        import torch
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        ndim = grid.ndim
+        end_idx = tuple(reversed(end))
+        start_idx = tuple(reversed(start))
+
+        obstacle_np, solved_np, free_np = self._build_masks(grid, end_idx)
+        obstacle = torch.from_numpy(obstacle_np).to(device)
+        solved = torch.from_numpy(solved_np).to(device)
+        free = torch.from_numpy(free_np).to(device)
+
+        v_max = 1.0
+        phi = torch.ones(grid.shape, dtype=torch.double, device=device)
+        phi[end_idx] = 0.0
+        phi[obstacle] = v_max
+
+        inner = tuple(slice(1, -1) for _ in range(ndim))
+
+        while not bool(solved[start_idx]):
+            for _ in range(self.n_l):
+                padded = self._edge_pad_torch(phi)
+                new_phi = torch.zeros_like(phi)
+                for d in range(ndim):
+                    for direction in (slice(None, -2), slice(2, None)):
+                        sl = list(inner)
+                        sl[d] = direction
+                        new_phi += padded[tuple(sl)]
+                new_phi *= 1.0 / (2 * ndim)
+                phi = torch.where(free, new_phi, phi)
+                phi[end_idx] = 0.0
+
+            s_new = free & (phi <= v_max - self.epsilon)
+            solved |= s_new
+            free &= ~s_new
+
+            v_max += 1.0
+            phi = torch.where(free | obstacle, torch.full_like(phi, v_max), phi)
+
+        return phi.cpu().numpy()
 
     def result(self, visualize=False):
         if visualize:

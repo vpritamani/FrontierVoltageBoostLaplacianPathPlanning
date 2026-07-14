@@ -20,6 +20,14 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
+def _gpu_param() -> "ParamSpec":
+    """Shared 'Use GPU' toggle: PyTorch implementation, CUDA when available."""
+    return ParamSpec('use_gpu', 'Use GPU (PyTorch)', 'bool', False,
+                     help='Run the PyTorch implementation — on CUDA when a GPU '
+                          'is available, otherwise on CPU via PyTorch. '
+                          'Requires PyTorch to be installed.')
+
+
 def _load_class(module_file: str, class_name: str):
     """Import ``class_name`` from a file path relative to the project root."""
     path = os.path.join(_PROJECT_ROOT, module_file)
@@ -127,6 +135,31 @@ REGISTRY: list[AlgorithmSpec] = [
                       help='Steps without progress toward the goal before reporting a local minimum (unsolved).'),
             ParamSpec('bilinear_interpolation', 'Bilinear interpolation', 'bool', True,
                       help='Sample the potential continuously during gradient descent.'),
+            _gpu_param(),
+        ],
+    ),
+    AlgorithmSpec(
+        id='potential_field_nd',
+        label='Potential Field ND (baseline)',
+        dims=None,   # any dimensionality
+        module_file=os.path.join('Algorithms', 'Baseline Algorithms', 'potentialfieldnd.py'),
+        class_name='PotentialFieldAlgorithmND',
+        params=[
+            ParamSpec('q_star', 'Influence radius (q*)', 'float', 30.0, min=1.0, step=1.0,
+                      help='Obstacles repel within this distance (in cells). Scale with map size.'),
+            ParamSpec('k_att', 'Attractive gain', 'float', 1.0, min=0.0, step=0.1,
+                      help='Weight of the goal attraction term.'),
+            ParamSpec('k_rep', 'Repulsive gain', 'float', 10000.0, min=0.0, step=100.0,
+                      help='Weight of the obstacle repulsion term.'),
+            ParamSpec('step_size', 'Step size', 'float', 1.0, min=0.05, step=0.05,
+                      help='Gradient descent step size.'),
+            ParamSpec('max_iters', 'Max iterations', 'int', 10000, min=100,
+                      help='Descent steps before giving up.'),
+            ParamSpec('stall_window', 'Stall window', 'int', 100, min=10,
+                      help='Steps without progress toward the goal before reporting a local minimum (unsolved).'),
+            ParamSpec('bilinear_interpolation', 'N-linear interpolation', 'bool', True,
+                      help='Sample the potential continuously during gradient descent.'),
+            _gpu_param(),
         ],
     ),
     AlgorithmSpec(
@@ -146,6 +179,7 @@ REGISTRY: list[AlgorithmSpec] = [
                       help='Distance at which a node connects to the goal.'),
             ParamSpec('seed', 'Seed (-1 = random)', 'int', -1, min=-1,
                       help='Fix for reproducible trees; -1 uses fresh randomness.'),
+            _gpu_param(),
         ],
     ),
     AlgorithmSpec(
@@ -163,6 +197,7 @@ REGISTRY: list[AlgorithmSpec] = [
                       help='Gradient descent step size.'),
             ParamSpec('bilinear_interpolation', 'Bilinear interpolation', 'bool', True,
                       help='Sample phi continuously during gradient descent.'),
+            _gpu_param(),
         ],
     ),
     AlgorithmSpec(
@@ -180,6 +215,7 @@ REGISTRY: list[AlgorithmSpec] = [
                       help='Gradient descent step size.'),
             ParamSpec('bilinear_interpolation', 'Trilinear interpolation', 'bool', True,
                       help='Sample phi continuously during gradient descent.'),
+            _gpu_param(),
         ],
     ),
     AlgorithmSpec(
@@ -197,6 +233,7 @@ REGISTRY: list[AlgorithmSpec] = [
                       help='Gradient descent step size.'),
             ParamSpec('bilinear_interpolation', 'N-linear interpolation', 'bool', True,
                       help='Sample phi continuously during gradient descent.'),
+            _gpu_param(),
         ],
     ),
 ]

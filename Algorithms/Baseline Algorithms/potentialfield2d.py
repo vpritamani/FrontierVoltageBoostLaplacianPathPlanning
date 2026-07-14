@@ -43,6 +43,7 @@ class PotentialFieldAlgorithm(Algorithm2D):
         max_iters: int = 10000,
         stall_window: int = 100,
         bilinear_interpolation: bool = True,
+        use_gpu: bool = False,
     ):
         super().__init__(map)
         self.q_star = q_star
@@ -52,6 +53,7 @@ class PotentialFieldAlgorithm(Algorithm2D):
         self.max_iters = max_iters
         self.stall_window = stall_window
         self.bilinear_interpolation = bilinear_interpolation
+        self.use_gpu = use_gpu   # assemble the potential with PyTorch (CUDA when available)
         self._path = None
         self._potential = None
 
@@ -64,7 +66,10 @@ class PotentialFieldAlgorithm(Algorithm2D):
         start = self.map.start  # (x, y)
         end = self.map.end      # (x, y)
 
-        self._potential = self._compute_potential(grid, end)
+        if self.use_gpu:
+            self._potential = self._compute_potential_torch(grid, end)
+        else:
+            self._potential = self._compute_potential(grid, end)
         self._path = self._gradient_descent(self._potential, grid, start, end)
 
         if visualize:
@@ -98,6 +103,30 @@ class PotentialFieldAlgorithm(Algorithm2D):
         u_rep[obstacle] = self.OBSTACLE_POTENTIAL
 
         return u_att + u_rep
+
+    def _compute_potential_torch(self, grid, goal):
+        """Same potential, elementwise math on a torch device (CUDA if present).
+        The distance transform itself stays on the CPU (SciPy)."""
+        import torch
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        gx, gy = goal
+        rows, cols = grid.shape
+
+        ys = torch.arange(rows, dtype=torch.double, device=device).view(-1, 1)
+        xs = torch.arange(cols, dtype=torch.double, device=device).view(1, -1)
+        u_att = 0.5 * self.k_att * ((ys - gy) ** 2 + (xs - gx) ** 2)
+
+        obstacle_np = grid == 1
+        dist = torch.from_numpy(
+            np.asarray(distance_transform_edt(~obstacle_np), dtype=np.float64)).to(device)
+        obstacle = torch.from_numpy(obstacle_np).to(device)
+
+        u_rep = torch.zeros_like(u_att)
+        near = (dist < self.q_star) & (dist > 0)
+        u_rep[near] = 0.5 * self.k_rep * (1.0 / dist[near] - 1.0 / self.q_star) ** 2
+        u_rep[obstacle] = self.OBSTACLE_POTENTIAL
+
+        return (u_att + u_rep).cpu().numpy()
 
     # ------------------------------------------------------------------
     # Gradient descent

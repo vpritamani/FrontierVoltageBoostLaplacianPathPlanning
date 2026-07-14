@@ -40,6 +40,7 @@ class RRTAlgorithm(BaseAlgorithm):
         goal_sample_rate: float = 0.05,
         goal_tolerance: float = 1.5,
         seed: int = -1,
+        use_gpu: bool = False,
     ):
         super().__init__(map)
         self.max_iterations = max_iterations
@@ -47,6 +48,7 @@ class RRTAlgorithm(BaseAlgorithm):
         self.goal_sample_rate = goal_sample_rate
         self.goal_tolerance = goal_tolerance
         self.seed = seed               # -1 = unseeded (fresh randomness per solve)
+        self.use_gpu = use_gpu         # torch nearest-neighbour + collision checks
         self._path = None
 
     # ------------------------------------------------------------------
@@ -65,6 +67,12 @@ class RRTAlgorithm(BaseAlgorithm):
         if self._cell_blocked(grid, start) or self._cell_blocked(grid, goal):
             self._path = None
             return None
+
+        if self.use_gpu:
+            self._path = self._solve_torch(grid, start, goal, ndim, sizes, rng)
+            if self._path is not None and visualize:
+                self._visualize()
+            return self._path
 
         nodes = np.empty((self.max_iterations + 1, ndim), dtype=float)
         nodes[0] = start
@@ -115,6 +123,76 @@ class RRTAlgorithm(BaseAlgorithm):
         if visualize:
             self._visualize()
         return self._path
+
+    # ------------------------------------------------------------------
+    # PyTorch variant (CUDA when available): nearest-neighbour search and
+    # segment collision checks run as batched tensor ops on the device.
+    # Uses the same RNG stream as the CPU path, so seeded runs match.
+    # ------------------------------------------------------------------
+
+    def _solve_torch(self, grid, start, goal, ndim, sizes, rng):
+        import torch
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        grid_t = torch.from_numpy(np.ascontiguousarray(grid)).to(device)
+        shape_t = torch.tensor(grid.shape, dtype=torch.long, device=device)
+
+        nodes = torch.empty((self.max_iterations + 1, ndim), dtype=torch.double, device=device)
+        nodes[0] = torch.from_numpy(start).to(device)
+        goal_t = torch.from_numpy(goal).to(device)
+        parents = [-1]
+        count = 1
+
+        def segment_free(a, b):
+            dist = float(torch.linalg.vector_norm(b - a))
+            steps = max(1, int(math.ceil(dist / self._COLLISION_RESOLUTION)))
+            t = torch.linspace(0, 1, steps + 1, dtype=torch.double, device=device).view(-1, 1)
+            pts = a.view(1, -1) + (b - a).view(1, -1) * t
+            idx = pts.floor().long().flip(1)          # user order -> grid order
+            if bool((idx < 0).any()) or bool((idx >= shape_t.view(1, -1)).any()):
+                return False
+            flat = torch.zeros(idx.shape[0], dtype=torch.long, device=device)
+            stride = 1
+            for d in range(ndim - 1, -1, -1):
+                flat += idx[:, d] * stride
+                stride *= grid.shape[d]
+            return not bool(grid_t.reshape(-1)[flat].any())
+
+        for _ in range(self.max_iterations):
+            if rng.random() < self.goal_sample_rate:
+                sample = goal_t
+            else:
+                sample = torch.tensor([rng.uniform(0, s - 1) for s in sizes],
+                                      dtype=torch.double, device=device)
+
+            diffs = nodes[:count] - sample
+            nearest_idx = int(torch.argmin((diffs * diffs).sum(dim=1)))
+            nearest = nodes[nearest_idx]
+
+            direction = sample - nearest
+            dist = float(torch.linalg.vector_norm(direction))
+            if dist < 1e-9:
+                continue
+            new = nearest + direction * min(1.0, self.step_size / dist)
+
+            if not segment_free(nearest, new):
+                continue
+
+            nodes[count] = new
+            parents.append(nearest_idx)
+            new_idx = count
+            count += 1
+
+            if (float(torch.linalg.vector_norm(new - goal_t)) <= self.goal_tolerance
+                    and segment_free(new, goal_t)):
+                path = [tuple(float(c) for c in goal)]
+                idx = new_idx
+                while idx != -1:
+                    path.append(tuple(float(c) for c in nodes[idx].cpu()))
+                    idx = parents[idx]
+                return path[::-1]
+
+        return None
 
     # ------------------------------------------------------------------
     # Collision checking

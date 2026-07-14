@@ -13,6 +13,7 @@ From the project root, run these two commands once:
 ```bash
 pip install -e .
 pip install numpy scipy pillow flask
+pip install torch        # optional — enables the "Use GPU (PyTorch)" algorithm variants
 ```
 
 `pip install -e .` registers `Algorithms`, `map_generation`, and `smoothness_metrics` on your Python path so all imports work without any manual path setup. You only need to do this once per environment.
@@ -31,6 +32,8 @@ This starts a local server at `http://127.0.0.1:8177` and opens your browser. Fr
 
 - **Generate map sets** (2D or 3D, any size/count, obstacle range, optional seed) — every map is verified solvable with A* before being accepted — or **import** existing `.npy` map folders
 - **Run one or more algorithms** with full parameter control on new maps, an existing map set, or any subset of maps — and **cancel** an in-flight run at any point (partial results are kept)
+- **Parallelize** a run across CPU cores ("Parallel workers" on the Execute card) — (map, algorithm) cells run concurrently, each still in its own watchdog subprocess; use 1 worker for the fairest timing comparisons
+- **GPU acceleration** — every algorithm except A* has a "Use GPU (PyTorch)" toggle (FVB's Laplace step as a torch convolution, potential-field assembly and RRT nearest-neighbour/collision checks as tensor ops). CUDA is used when available, with a CPU-PyTorch fallback otherwise; the Execute card shows what your machine supports. A* stays CPU-only — its sequential priority-queue search has no meaningful GPU mapping
 - **Compare results** — per-instance summaries labeled with their hyperparameters (the same algorithm can be added to a run any number of times with different parameters), a metric comparison view, the full per-map results table with all smoothness metrics, and side-by-side path images
 - **Compare tab** — cross-run comparison with any number of steering-penalty configs at once (e.g. @20° and @30° side by side or as X/Y axes), a metric graph (2D/3D scatter or lines vs map size/dimensionality with one line per algorithm configuration), PNG export of the graph, and a combined raw-data CSV for all selected runs
 - **Metrics lab** — solved paths are stored with each run (FVB paths keep their continuous decimal coordinates), so you can recompute all smoothness metrics with a different steering θ / sweep range instantly, preview the effect, and optionally save — without re-running any planner
@@ -64,6 +67,7 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   ├── Baseline Algorithms/
 │   │   ├── astar.py              # AStarAlgorithm (dimension-agnostic)
 │   │   ├── potentialfield2d.py   # PotentialFieldAlgorithm (2D)
+│   │   ├── potentialfieldnd.py   # PotentialFieldAlgorithmND (any dimensionality)
 │   │   └── rrt.py                # RRTAlgorithm (dimension-agnostic)
 │   ├── Frontier Voltage Boost/
 │   │   ├── frontiervoltageboostlaplace.py
@@ -110,9 +114,12 @@ BaseAlgorithm  (algorithm.py)
 ├── Algorithm3D  (3dalgorithm.py)        — for algorithms that only work in 3D
 │   └── FrontierVoltageBoostLaplace3D
 ├── FrontierVoltageBoostLaplaceND  (ndfrontiervoltageboostlaplace.py) — any dimensionality
+├── PotentialFieldAlgorithmND  (potentialfieldnd.py) — any dimensionality
 ├── AStarAlgorithm  (astar.py)           — dimension-agnostic, reads grid.ndim at solve time
 └── RRTAlgorithm  (rrt.py)               — dimension-agnostic, continuous (decimal) node positions
 ```
+
+All algorithms except A* accept `use_gpu=True` for a PyTorch implementation (CUDA when available, CPU-PyTorch fallback otherwise); the default NumPy paths are unchanged and produce numerically identical results.
 
 New algorithms extend `Algorithm2D`, `Algorithm3D`, or `BaseAlgorithm` directly depending on whether they are dimension-specific.
 

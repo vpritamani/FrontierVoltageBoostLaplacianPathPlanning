@@ -75,6 +75,27 @@ def api_registry():
     return jsonify(registry_json())
 
 
+_system_info = None
+
+@app.get('/api/system')
+def api_system():
+    """Host capabilities for the UI: CPU cores, PyTorch/CUDA availability."""
+    global _system_info
+    if _system_info is None:
+        info = {'cpu_count': os.cpu_count() or 1,
+                'torch': False, 'cuda': False, 'cuda_device': None}
+        try:
+            import torch
+            info['torch'] = True
+            if torch.cuda.is_available():
+                info['cuda'] = True
+                info['cuda_device'] = torch.cuda.get_device_name(0)
+        except Exception:
+            pass
+        _system_info = info
+    return jsonify(_system_info)
+
+
 # ---------------------------------------------------------------------------
 # Map sets
 # ---------------------------------------------------------------------------

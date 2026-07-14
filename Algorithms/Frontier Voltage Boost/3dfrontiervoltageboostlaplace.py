@@ -7,12 +7,13 @@ from Algorithms import Algorithm3D
 class FrontierVoltageBoostLaplace3D(Algorithm3D):
 
     def __init__(self, map, n_l: int, epsilon: float, step_size: float = 1.0,
-                 bilinear_interpolation: bool = True):
+                 bilinear_interpolation: bool = True, use_gpu: bool = False):
         super().__init__(map)
         self.n_l = n_l
         self.epsilon = epsilon
         self.step_size = step_size
         self.bilinear_interpolation = bilinear_interpolation
+        self.use_gpu = use_gpu   # PyTorch wavefront solve (CUDA when available)
         self._path = None
         self._phi = None
 
@@ -24,6 +25,25 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
         grid = self.map.grid        # shape (D, H, W) = (Z, Y, X)
         start = self.map.start      # (x, y, z)
         end = self.map.end          # (x, y, z)
+
+        if self.use_gpu:
+            phi = self._solve_phi_torch(grid, start, end)
+        else:
+            phi = self._solve_phi(grid, start, end)
+
+        self._phi = phi
+        self._path = self._gradient_descent(phi, start, end)
+
+        if visualize:
+            self._visualize()
+
+        return self._path
+
+    # ------------------------------------------------------------------
+    # Wavefront potential solve — CPU (NumPy, default)
+    # ------------------------------------------------------------------
+
+    def _solve_phi(self, grid, start, end):
         sx, sy, sz = start
         ex, ey, ez = end
 
@@ -45,13 +65,56 @@ class FrontierVoltageBoostLaplace3D(Algorithm3D):
             v_max += 1.0
             phi[free | obstacle] = v_max
 
-        self._phi = phi
-        self._path = self._gradient_descent(phi, start, end)
+        return phi
 
-        if visualize:
-            self._visualize()
+    # ------------------------------------------------------------------
+    # Wavefront potential solve — PyTorch (CUDA when available)
+    # ------------------------------------------------------------------
 
-        return self._path
+    def _solve_phi_torch(self, grid, start, end):
+        """Identical wavefront/boost logic with the 6-neighbour Laplace
+        average expressed as a conv3d so it runs on the GPU."""
+        import torch
+        import torch.nn.functional as tF
+
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        sx, sy, sz = start
+        ex, ey, ez = end
+
+        kernel = torch.zeros((1, 1, 3, 3, 3), dtype=torch.double, device=device)
+        w = 1.0 / 6.0
+        kernel[0, 0, 0, 1, 1] = w
+        kernel[0, 0, 2, 1, 1] = w
+        kernel[0, 0, 1, 0, 1] = w
+        kernel[0, 0, 1, 2, 1] = w
+        kernel[0, 0, 1, 1, 0] = w
+        kernel[0, 0, 1, 1, 2] = w
+
+        obstacle_np, solved_np, free_np = self._build_masks(grid, ez, ey, ex)
+        obstacle = torch.from_numpy(obstacle_np).to(device)
+        solved = torch.from_numpy(solved_np).to(device)
+        free = torch.from_numpy(free_np).to(device)
+
+        v_max = 1.0
+        phi = torch.ones(grid.shape, dtype=torch.double, device=device)
+        phi[ez, ey, ex] = 0.0
+        phi[obstacle] = v_max
+
+        while not bool(solved[sz, sy, sx]):
+            for _ in range(self.n_l):
+                padded = tF.pad(phi.view(1, 1, *phi.shape), (1, 1, 1, 1, 1, 1), mode='replicate')
+                new_phi = tF.conv3d(padded, kernel).view(*phi.shape)
+                phi = torch.where(free, new_phi, phi)
+                phi[ez, ey, ex] = 0.0
+
+            s_new = free & (phi <= v_max - self.epsilon)
+            solved |= s_new
+            free &= ~s_new
+
+            v_max += 1.0
+            phi = torch.where(free | obstacle, torch.full_like(phi, v_max), phi)
+
+        return phi.cpu().numpy()
 
     def result(self, visualize=False):
         if visualize:
