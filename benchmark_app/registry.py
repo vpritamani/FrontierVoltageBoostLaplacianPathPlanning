@@ -25,7 +25,9 @@ def _gpu_param() -> "ParamSpec":
     return ParamSpec('use_gpu', 'Use GPU (PyTorch)', 'bool', False,
                      help='Run the PyTorch implementation — on CUDA when a GPU '
                           'is available, otherwise on CPU via PyTorch. '
-                          'Requires PyTorch to be installed.')
+                          'Requires PyTorch. Note: pays off on large maps with '
+                          'a real GPU; on small maps or without CUDA the NumPy '
+                          'default is faster.')
 
 
 def _load_class(module_file: str, class_name: str):

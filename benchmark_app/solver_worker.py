@@ -35,6 +35,14 @@ def _worker(conn, algo_id: str, params: dict, grid: np.ndarray, start: tuple, en
         spec = get_spec(algo_id)
         algo = spec.build(map_obj, params)
 
+        # Importing PyTorch in this fresh subprocess costs ~0.5s+ — that's
+        # environment setup, not algorithm work. Pre-import it here so the
+        # timed region below measures the solve itself.
+        if (params or {}).get('use_gpu'):
+            import torch  # noqa: F401
+            if torch.cuda.is_available():
+                torch.cuda.init()   # CUDA context setup is also not solve time
+
         t0 = time.perf_counter()
         path = algo.solve()
         elapsed = time.perf_counter() - t0
