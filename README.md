@@ -12,9 +12,11 @@ From the project root, run these two commands once:
 
 ```bash
 pip install -e .
-pip install numpy scipy pillow flask
+pip install numpy scipy pillow flask rtree
 pip install torch        # optional — enables the "Use GPU (PyTorch)" algorithm variants
 ```
+
+(`rtree` is used by the incremental RRT–Laplace planners for tree connectivity; `pip install rtree` ships the native library, no extra setup.)
 
 `pip install -e .` registers `Algorithms`, `map_generation`, and `smoothness_metrics` on your Python path so all imports work without any manual path setup. You only need to do this once per environment.
 
@@ -109,8 +111,8 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   │   ├── 3dfrontiervoltageboostlaplace.py
 │   │   └── ndfrontiervoltageboostlaplace.py
 │   └── Incremental Algorithms/
-│       ├── rrtlaplacefrontier.py
-│       └── rrtlaplacerandomsampling.py
+│       ├── rrtlaplacerandomsampling.py  # RRTLaplaceRandomSampling (2D)
+│       └── rrtlaplacefrontier.py        # RRTLaplaceFrontier (2D)
 ├── Map Generation/
 │   ├── map.py                    # Map base class
 │   ├── 2dmap.py                  # Map2D
@@ -146,7 +148,9 @@ BaseAlgorithm  (algorithm.py)
 │   └── PotentialFieldAlgorithm  (potentialfield2d.py)
 ├── Algorithm3D  (3dalgorithm.py)        — for algorithms that only work in 3D
 │   └── FrontierVoltageBoostLaplace3D
-├── FrontierVoltageBoostLaplaceND  (ndfrontiervoltageboostlaplace.py) — any dimensionality
+│   ├── FrontierVoltageBoostLaplaceND  (ndfrontiervoltageboostlaplace.py) — any dimensionality
+│   ├── RRTLaplaceRandomSampling  (rrtlaplacerandomsampling.py) — 2D incremental
+│   └── RRTLaplaceFrontier  (rrtlaplacefrontier.py) — 2D incremental
 ├── PotentialFieldAlgorithmND  (potentialfieldnd.py) — any dimensionality
 ├── AStarAlgorithm  (astar.py)           — dimension-agnostic, reads grid.ndim at solve time
 └── RRTAlgorithm  (rrt.py)               — dimension-agnostic, continuous (decimal) node positions
@@ -158,9 +162,15 @@ New algorithms extend `Algorithm2D`, `Algorithm3D`, or `BaseAlgorithm` directly 
 
 ---
 
-## RRT – Laplace Hybridization Algorithm (Pure Random Sampling)
+## RRT–Laplace Hybridization (Pure Random Sampling)
 
-## Frontier RRT – Laplace Hybridization Algorithm (Random Sampling on Frontier)
+`RRTLaplaceRandomSampling` — an incremental predecessor of Frontier Voltage Boost Laplace. It relaxes a plain **harmonic** potential (obstacles pinned to 1, goal pinned to 0, free space averaged by repeated 4-neighbour Laplace sweeps) with **no voltage boost**, and grows an RRT-style tree of zero-potential nodes rooted at the goal. After an `n_w`-iteration warm-up, each step runs `n_l` Laplace sweeps, then descends from up to `n_r` random points in the already-diffused region (each is the start with probability `prob_sp`); a descent that reaches the tree is added as a new branch (its cells pinned to 0), widening the low-potential basin until it reaches the start. Tree connectivity uses an `rtree` spatial index.
+
+## Frontier RRT–Laplace Hybridization (Random Sampling on the Frontier)
+
+`RRTLaplaceFrontier` — the same harmonic-potential, growing-tree, no-boost design, but with no warm-up and seeds drawn from the **frontier** between the *solved* region (`phi ≤ 1 − epsilon`) and free space (a NumPy segmentation of the solved-vs-free masks) rather than uniformly at random. It iterates until the start is solved, then descends from the start into the tree. Focusing growth at the frontier expands the basin outward more directly than uniform sampling.
+
+Both are 2D and support `use_gpu` (Laplace sweeps as a `conv2d`). They are baselines that led to FVB — functional but noticeably less smooth than the final algorithm (their paths follow tree branches rather than a single boosted wavefront).
 
 ## Frontier Voltage Boost Laplacian Path Planning (Final Algorithm)
 
