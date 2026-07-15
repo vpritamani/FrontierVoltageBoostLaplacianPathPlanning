@@ -259,11 +259,11 @@ def import_map_set(
     id_holder: dict | None = None,
 ) -> dict:
     """Import an existing folder of ``.npy`` maps + ``start_end_points.csv``
-    (the format written by the retired CLI scripts) as a new map set.
+    (map name and start/end points per row) as a new map set.
 
     The folder itself is not modified — files are copied into
-    ``Benchmark Data/map_sets/<new id>/``. Maps are not re-validated for
-    solvability (the original generators validated them at creation).
+    ``Benchmark Data/map_sets/<new id>/``. Imported maps are not re-validated
+    for solvability.
     """
     import csv as _csv
 

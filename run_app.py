@@ -1,9 +1,13 @@
 """
 Launch the Path Planning Benchmark web app.
 
-    python run_app.py            # starts on http://127.0.0.1:8177 and opens browser
+    python run_app.py                         # http://127.0.0.1:8177, opens browser
     python run_app.py --port 9000
-    python run_app.py --no-browser
+    python run_app.py --no-browser            # headless (e.g. on a VM)
+    python run_app.py --host 0.0.0.0 --no-browser   # reachable on the machine's network
+
+On a remote VM, prefer an SSH tunnel (`ssh -L 8177:localhost:8177 user@host`) over
+binding to 0.0.0.0 — the built-in server has no authentication. See the README.
 """
 
 import argparse

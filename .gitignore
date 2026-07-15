@@ -6,9 +6,6 @@ __pycache__/
 *.egg-info/
 *.egg
 
-# Test Suite generated output
-Test Suite/output/
-
 # Benchmark app data (map sets + run results)
 Benchmark Data/
 

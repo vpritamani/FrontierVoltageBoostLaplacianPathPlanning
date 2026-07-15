@@ -677,13 +677,12 @@ function importMapSetFlow() {
     bodyHTML: `
       <p style="font-size:13px;color:var(--ink-2)">
         Point at a folder containing <code>.npy</code> map files and a
-        <code>start_end_points.csv</code> (the format the old CLI scripts produced,
-        e.g. <code>Test Suite/output/2d_maps</code>). Files are copied — the source
-        folder is not modified.
+        <code>start_end_points.csv</code> listing each map's name and its
+        start/end points. Files are copied — the source folder is not modified.
       </p>
       <div class="field" style="margin-top:10px">
         <label>Folder path</label>
-        <input type="text" id="imp-path" placeholder="Test Suite/output/2d_maps" style="width:100%">
+        <input type="text" id="imp-path" placeholder="/path/to/maps" style="width:100%">
       </div>
       <div class="field" style="margin-top:10px">
         <label>Set name (optional)</label>

@@ -51,11 +51,43 @@ To register a new algorithm in the app, add one `AlgorithmSpec` entry to `benchm
 
 Each solve executes in a watchdog subprocess with a configurable timeout, so an algorithm that hangs or crashes cannot take down the app or stall a benchmark run.
 
+All state (map sets and run results) is written under `Benchmark Data/` in the project root and reloaded on the next launch, so nothing is lost between sessions.
+
 ---
 
-## 3. Importing maps from the old CLI scripts
+## 3. Running on a remote VM
 
-The old CLI scripts are retired — the app covers everything they did, for every algorithm and dimensionality. Folders they produced (e.g. `Test Suite/output/2d_maps` with `.npy` files + `start_end_points.csv`) can be pulled into the app via **Map Sets → Import from folder…**; the files are copied, the source folder is untouched.
+The app is a normal local web server, so a VM works the same as your laptop — you just need a way to reach the port. Clone and install as in step 1 (on a headless VM add `--no-browser` so it doesn't try to open a browser there).
+
+### Option A — SSH port forwarding (recommended)
+
+Keeps the app private to your machine; nothing is exposed on the VM's network.
+
+```bash
+# On the VM: run bound to localhost (the default)
+python run_app.py --no-browser        # serves on 127.0.0.1:8177 on the VM
+
+# On your laptop: forward a local port to the VM's port over SSH
+ssh -L 8177:localhost:8177 user@your-vm-host
+```
+
+Then open `http://localhost:8177` in your local browser — the traffic is tunneled to the VM. Use a different left-hand number (e.g. `-L 9000:localhost:8177`) if 8177 is taken locally.
+
+### Option B — bind to all interfaces
+
+Expose the app on the VM's own address. Only do this on a trusted network — the built-in server is a single-user dev server with no authentication.
+
+```bash
+# On the VM
+python run_app.py --host 0.0.0.0 --port 8177 --no-browser
+```
+
+Then browse to `http://<vm-ip>:8177`. On a cloud VM you must also allow inbound TCP on that port in the firewall / security group (AWS security group, GCP firewall rule, Azure NSG, or `ufw allow 8177`). If you can SSH in, **Option A needs none of this** and is the safer default.
+
+### Notes
+
+- `--port N` changes the port on both sides; keep the VM-side port consistent with your tunnel/firewall rule.
+- `Benchmark Data/` lives on the VM, so generated maps and results persist there across restarts and disconnects — a run keeps going even if you close the SSH session, as long as the `run_app.py` process stays alive (use `tmux`/`screen` or `nohup … &` to detach it).
 
 ---
 
@@ -89,8 +121,6 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   ├── smoothnessmetrics.py      # SmoothnessMetrics aggregator
 │   ├── steering_penalty.py       # recommended metric
 │   └── ...                       # one file per metric
-├── Test Suite/
-│   └── output/                   # legacy CLI map output (importable in the app)
 ├── benchmark_app/                # local web app (Flask + vanilla JS)
 │   ├── registry.py               # ← add new algorithms here
 │   ├── server.py                 # HTTP API
