@@ -138,10 +138,14 @@ def enqueue_run(config: dict, map_set_from_job: str | None = None) -> dict:
         # Each entry is an *instance*: the same algorithm may appear several
         # times with different params, so every instance gets a unique key
         # (used for result grouping and paths/images storage dirs).
+        # 'graph_label' is an optional user-chosen display name for charts —
+        # purely cosmetic: the algorithm id and full hyperparameters are always
+        # stored alongside it and never replaced by it.
         'algorithms': [
             {'key': f"{a['id']}-{i + 1}",
              'id': a['id'],
-             'label': a.get('label') or get_spec(a['id']).label,
+             'label': get_spec(a['id']).label,
+             'graph_label': (str(a.get('graph_label') or '').strip() or None),
              'params': get_spec(a['id']).coerce_params(a.get('params'))}
             for i, a in enumerate(config['algorithms'])
         ],

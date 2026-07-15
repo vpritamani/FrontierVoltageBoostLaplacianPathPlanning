@@ -53,7 +53,14 @@ const LAB = { theta: 30, sweep: 5, preview: null, runId: null };
 
 /* Cross-run compare state. */
 const CMP = { sel: new Set(), metric: 'steer|30|5', cache: new Map(),
-              graph: { mode: 'scatter', x: 'mean_time_s', y: 'steer|30|5', z: 'none' } };
+              graph: { mode: 'scatter', x: 'mean_time_s', y: 'steer|30|5', z: 'none' },
+              // manual axis limits ('' = autofit) — editable + wheel-zoomable
+              limits: { xmin: '', xmax: '', ymin: '', ymax: '', zmin: '', zmax: '' },
+              // hyperparameter sweep panel state (param2 = optional 3rd dimension)
+              hp: { algo: '', param: '', param2: 'none', y: 'steer|30|5',
+                    limits: { xmin: '', xmax: '', ymin: '', ymax: '', zmin: '', zmax: '' },
+                    view: { yaw: 0.7, pitch: 0.45, zoom: 1.0 } },
+              lastRows: [] };
 
 /* Decoded grid cache for viewers: key "msId/mapName" -> {shape, data}. */
 const GRIDS = new Map();
@@ -133,8 +140,37 @@ function systemLine() {
   return 'PyTorch not installed — runs with “Use GPU (PyTorch)” ticked will fail (pip install torch).';
 }
 
-/* Instance display label — always states the hyperparameters. */
+/* ---- theme: explicit toggle overriding the system preference ---- */
+
+function applyTheme() {
+  const saved = localStorage.getItem('bench-theme');
+  const theme = saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  document.documentElement.dataset.theme = theme;
+}
+
+function refreshCurrentView() {
+  if (S.tab === 'run') renderRunTab();
+  else if (S.tab === 'maps') renderMapSets();
+  else if (S.tab === 'results') { if (S.openRunId) renderRunDetail(); else renderRunsList(); }
+  else if (S.tab === 'compare') renderCompareTab();
+}
+
+applyTheme();
+$('#theme-toggle').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem('bench-theme', next);
+  document.documentElement.dataset.theme = next;
+  refreshCurrentView();   // charts read theme colors at draw time
+});
+
+/* Instance display label.
+
+   A user-set graph_label wins for chart/table readability; otherwise the
+   algorithm name plus a full hyperparameter summary. The hyperparameters
+   themselves are ALWAYS stored on the instance and shown alongside (tooltips,
+   params columns) — a custom label never replaces that data. */
 function instLabel(algorithms, entry) {
+  if (entry.graph_label) return entry.graph_label;
   const ps = paramsSummary(entry.params);
   return ps ? `${entry.label} (${ps})` : entry.label;
 }
@@ -419,9 +455,11 @@ function renderAlgoBuilder() {
   const listHTML = F.algoList.length ? F.algoList.map((inst, i) => {
     const spec = S.registry.find(r => r.id === inst.id);
     const ok = spec && specSupports(spec, dims);
+    const name = spec ? spec.label : inst.id;
     return `<div class="algo-inst ${ok ? '' : 'bad'}">
       <span class="chip" style="${chipStyle(inst.id)}"></span>
-      <b>${esc(spec ? spec.label : inst.id)}</b>
+      <b>${esc(inst.graph_label || name)}</b>
+      ${inst.graph_label ? `<span style="font-size:11.5px;color:var(--muted)">(${esc(name)})</span>` : ''}
       <span class="inst-params">${esc(paramsSummary(inst.params))}</span>
       ${ok ? '' : `<span class="inst-warn">not available for ${dims}D</span>`}
       <button class="btn btn-sm" data-edit-inst="${i}">Edit</button>
@@ -457,6 +495,12 @@ function renderAlgoBuilder() {
           </select>
           ${supported ? '' : `<span class="hint" style="color:var(--status-critical)">not available for ${dims}D maps</span>`}
         </div>
+        <div class="field" style="min-width:240px">
+          <label>Graph label (optional)</label>
+          <input type="text" id="add-graph-label" value="${esc(F.addForm.graph_label || '')}"
+                 placeholder="e.g. FVB fine (n_l=50)">
+          <span class="hint">Display name for charts — hyperparameters stay stored &amp; visible</span>
+        </div>
       </div>
       <div class="algo-params">${paramsHTML}</div>
       <div class="row" style="margin-top:10px">
@@ -475,14 +519,15 @@ function renderAlgoBuilder() {
   }));
   $$('[data-edit-inst]', box).forEach(b => b.addEventListener('click', () => {
     const i = Number(b.dataset.editInst);
-    F.addForm = { id: F.algoList[i].id, params: { ...F.algoList[i].params }, editIndex: i };
+    F.addForm = { id: F.algoList[i].id, params: { ...F.algoList[i].params },
+                  graph_label: F.algoList[i].graph_label || '', editIndex: i };
     renderAlgoBuilder();
   }));
 
   const openAdd = $('#open-add', box);
   if (openAdd) openAdd.addEventListener('click', () => {
     const spec = S.registry[0];
-    F.addForm = { id: spec.id, params: defaultParams(spec), editIndex: null };
+    F.addForm = { id: spec.id, params: defaultParams(spec), graph_label: '', editIndex: null };
     renderAlgoBuilder();
   });
 
@@ -494,11 +539,15 @@ function renderAlgoBuilder() {
       F.addForm.params = defaultParams(spec);
       renderAlgoBuilder();
     });
+    $('#add-graph-label', box).addEventListener('input', e => {
+      F.addForm.graph_label = e.target.value;
+    });
     $$('[data-ap]', box).forEach(inp => inp.addEventListener('change', () => {
       F.addForm.params[inp.dataset.ap] = inp.type === 'checkbox' ? inp.checked : Number(inp.value);
     }));
     $('#add-confirm', box).addEventListener('click', () => {
-      const inst = { id: F.addForm.id, params: { ...F.addForm.params } };
+      const inst = { id: F.addForm.id, params: { ...F.addForm.params },
+                     graph_label: (F.addForm.graph_label || '').trim() || null };
       if (F.addForm.editIndex != null) F.algoList[F.addForm.editIndex] = inst;
       else F.algoList.push(inst);
       F.addForm = null;
@@ -1078,7 +1127,8 @@ function prefillFromRun(d) {
   F.mapSel = null;
   const ms = S.mapSets.find(m => m.id === d.map_set_id);
   if (ms && d.map_names && d.map_names.length < ms.maps.length) F.mapSel = new Set(d.map_names);
-  F.algoList = (d.algorithms || []).map(a => ({ id: a.id, params: { ...a.params } }));
+  F.algoList = (d.algorithms || []).map(a => ({ id: a.id, params: { ...a.params },
+                                                graph_label: a.graph_label || null }));
   F.addForm = null;
   F.runName = d.name + ' (re-run)';
   F.timeout = d.solve_timeout_s || 120;
@@ -1230,6 +1280,8 @@ async function compareRows() {
       rows.push({
         runId: d.id, runName: d.name, algoId: a.id, algoKey: key,
         algoLabel: instLabel(d.algorithms, a),
+        algoName: a.label,
+        graphLabel: a.graph_label || null,
         params: a.params, mapSet: d.map_set_name || d.map_set_id, dims: d.dims,
         total: recs.length, solved: solved.length, vals,
       });
@@ -1248,6 +1300,7 @@ async function renderCompareBody() {
   body.innerHTML = `<div class="card"><p class="empty">Loading…</p></div>`;
 
   const { rows, details } = await compareRows();
+  CMP.lastRows = rows;
   const metricOpts = cmpMetricOptions();
   if (!metricOpts.find(m => m.key === CMP.metric)) CMP.metric = metricOpts[0].key;
   const mo = metricOpts.find(m => m.key === CMP.metric);
@@ -1329,7 +1382,20 @@ async function renderCompareBody() {
         <div class="field" style="min-width:210px"><label>Y axis</label>${axisSel('gx-y', CMP.graph.y, axisOptions())}</div>
         ${!isLine ? `<div class="field" style="min-width:210px"><label>Z axis (optional)</label>
           ${axisSel('gx-z', CMP.graph.z, [{ key: 'none', label: '— none (2D chart) —' }, ...axisOptions()])}</div>` : ''}
-        <button class="btn btn-sm" id="graph-png">Download PNG</button>
+      </div>
+      <div class="row" style="align-items:flex-end">
+        ${['x', 'y'].concat(is3dGraph() ? ['z'] : []).map(ax => `
+          <div class="field" style="min-width:150px">
+            <label>${ax.toUpperCase()} limits (min / max)</label>
+            <div style="display:flex;gap:4px">
+              <input type="text" data-lim="${ax}min" value="${esc(CMP.limits[ax + 'min'])}" placeholder="auto" style="width:70px">
+              <input type="text" data-lim="${ax}max" value="${esc(CMP.limits[ax + 'max'])}" placeholder="auto" style="width:70px">
+            </div>
+          </div>`).join('')}
+        <button class="btn btn-sm" id="graph-zoom-in" title="Zoom in">＋ zoom</button>
+        <button class="btn btn-sm" id="graph-zoom-out" title="Zoom out">－ zoom</button>
+        <button class="btn btn-sm" id="graph-reset">Reset view</button>
+        <button class="btn btn-sm" id="graph-png">Download PNG (current view, 2×)</button>
       </div>
       <div class="graph-wrap">
         <canvas id="cmp-graph" width="920" height="560"></canvas>
@@ -1337,17 +1403,23 @@ async function renderCompareBody() {
       </div>
       <div class="bar-note" id="graph-hint"></div>
 
+      <h3>Hyperparameter sweep <span style="font-weight:400;color:var(--muted)">(same algorithm, varying one parameter)</span></h3>
+      <div id="hp-panel"></div>
+
       <h3>Details</h3>
       <div style="overflow-x:auto"><table class="data">
         <thead><tr>
-          <th>Run</th><th>Algorithm (hyperparameters)</th><th>Map set</th>
+          <th>Run</th><th>Label</th><th>Hyperparameters</th><th>Map set</th>
           <th class="num">Solved</th><th class="num">Mean time (s)</th>
           ${steerCols.map(c => `<th class="num">${esc(c.label)}</th>`).join('')}
         </tr></thead>
         <tbody>
-          ${rows.map(r => `<tr>
+          ${rows.map((r, ri) => `<tr>
             <td><a class="plain" href="#" data-goto="${esc(r.runId)}">${esc(r.runName)}</a></td>
-            <td><span class="algo-cell"><span class="chip" style="${chipStyle(r.algoId)}"></span>${esc(r.algoLabel)}</span></td>
+            <td><span class="algo-cell"><span class="chip" style="${chipStyle(r.algoId)}"></span>
+              <span>${esc(r.graphLabel || r.algoName)}</span>
+              <button class="btn btn-sm" data-edit-label="${ri}" title="Edit chart label">✎</button></span></td>
+            <td style="font-size:11.5px;color:var(--ink-2);max-width:320px">${esc(paramsSummary(r.params))}</td>
             <td>${esc(r.mapSet)} (${r.dims}D)</td>
             <td class="num">${r.solved}/${r.total}</td>
             <td class="num">${fmt(r.vals.mean_time_s, 3)}</td>
@@ -1373,22 +1445,465 @@ async function renderCompareBody() {
   $$('[data-goto]', body).forEach(a => a.addEventListener('click', e => {
     e.preventDefault(); switchTab('results'); openRun(a.dataset.goto);
   }));
+  $$('[data-edit-label]', body).forEach(b => b.addEventListener('click', () =>
+    editGraphLabelFlow(rows[Number(b.dataset.editLabel)])));
   $('#gx-mode').addEventListener('change', e => { CMP.graph.mode = e.target.value; renderCompareBody(); });
   ['gx-x', 'gx-y', 'gx-z'].forEach((id, i) => {
     const el = $(`#${id}`);
     if (el) el.addEventListener('change', e => {
       CMP.graph[['x', 'y', 'z'][i]] = e.target.value;
-      drawCompareGraph(rows);
+      renderCompareBody();   // limits row depends on 2D/3D mode
     });
   });
+  $$('[data-lim]', body).forEach(inp => inp.addEventListener('change', () => {
+    CMP.limits[inp.dataset.lim] = inp.value.trim();
+    drawCompareGraph(CMP.lastRows);
+  }));
+  $('#graph-zoom-in').addEventListener('click', () => graphZoom(0.8));
+  $('#graph-zoom-out').addEventListener('click', () => graphZoom(1.25));
+  $('#graph-reset').addEventListener('click', () => {
+    CMP.limits = { xmin: '', xmax: '', ymin: '', ymax: '', zmin: '', zmax: '' };
+    GVIEW.yaw = 0.7; GVIEW.pitch = 0.45; GVIEW.zoom = 1.0;
+    renderCompareBody();
+  });
   $('#graph-png').addEventListener('click', () => {
+    // Export exactly the current view (limits, rotation, zoom) at 2× resolution.
+    const off = document.createElement('canvas');
+    off.width = 1840; off.height = 1120;
+    drawCompareGraph(CMP.lastRows, off);
     const a = document.createElement('a');
-    a.href = $('#cmp-graph').toDataURL('image/png');
+    a.href = off.toDataURL('image/png');
     a.download = 'metric_graph.png';
     a.click();
   });
 
+  renderHpPanel(rows, details);
   drawCompareGraph(rows);
+}
+
+function is3dGraph() {
+  return CMP.graph.mode === 'scatter' && CMP.graph.z !== 'none';
+}
+
+/* Zoom the 2D chart by scaling the effective limits about their center
+   (3D scatter zooms the projection instead). */
+function graphZoom(factor) {
+  if (is3dGraph()) {
+    GVIEW.zoom = Math.max(0.4, Math.min(3, GVIEW.zoom / factor));
+    drawCompareGraph(CMP.lastRows);
+    return;
+  }
+  const eff = CMP.lastEffLimits;   // set by the last draw
+  if (!eff) return;
+  for (const ax of ['x', 'y']) {
+    const [mn, mx] = eff[ax];
+    const c = (mn + mx) / 2, half = (mx - mn) / 2 * factor;
+    CMP.limits[ax + 'min'] = String(+(c - half).toPrecision(6));
+    CMP.limits[ax + 'max'] = String(+(c + half).toPrecision(6));
+  }
+  syncLimitInputs();
+  drawCompareGraph(CMP.lastRows);
+}
+
+function syncLimitInputs() {
+  $$('[data-lim]').forEach(inp => { inp.value = CMP.limits[inp.dataset.lim]; });
+}
+
+/* Edit the persisted chart label of one algorithm instance (cosmetic only —
+   the hyperparameters stay stored and displayed). */
+function editGraphLabelFlow(row) {
+  showModal({
+    title: 'Edit chart label',
+    confirmLabel: 'Save label',
+    confirmClass: 'btn-primary',
+    bodyHTML: `
+      <p style="font-size:13px;color:var(--ink-2)">
+        <span class="chip" style="${chipStyle(row.algoId)}"></span>
+        <b>${esc(row.algoName)}</b> in run “${esc(row.runName)}”<br>
+        Hyperparameters (always kept): <span style="font-size:12px">${esc(paramsSummary(row.params))}</span>
+      </p>
+      <div class="field" style="margin-top:10px">
+        <label>Chart label (empty = default name + hyperparameters)</label>
+        <input type="text" id="edit-label-input" value="${esc(row.graphLabel || '')}"
+               placeholder="${esc(row.algoName)}" style="width:100%">
+      </div>`,
+    onConfirm: async () => {
+      await api(`/api/runs/${row.runId}/graph_label`, {
+        method: 'POST',
+        body: JSON.stringify({ algorithm_key: row.algoKey,
+                               graph_label: $('#edit-label-input').value }),
+      });
+      CMP.cache.delete(row.runId);
+      for (const k of [...steerCache.keys()]) if (k.startsWith(row.runId + '|')) steerCache.delete(k);
+      if (S.runDetail && S.runDetail.id === row.runId) S.runDetail = null;
+      await refreshLists();
+      renderCompareBody();
+    },
+  });
+}
+
+/* ---- hyperparameter sweep: same algorithm, X = one numeric parameter ---- */
+
+function hpParamLabel(name) {
+  const spec = S.registry.find(r => r.id === CMP.hp.algo);
+  const p = spec && spec.params.find(p => p.name === name);
+  return p ? p.label : name;
+}
+
+function hpIs3d() { return CMP.hp.param2 && CMP.hp.param2 !== 'none'; }
+
+function renderHpPanel(rows, details) {
+  const panel = $('#hp-panel');
+  if (!panel) return;
+
+  const algoIds = [...new Set(rows.map(r => r.algoId))];
+  if (!CMP.hp.algo || !algoIds.includes(CMP.hp.algo)) CMP.hp.algo = algoIds[0] || '';
+  const spec = S.registry.find(r => r.id === CMP.hp.algo);
+  const numericParams = spec ? spec.params.filter(p => p.type === 'int' || p.type === 'float') : [];
+  if (!numericParams.find(p => p.name === CMP.hp.param)) {
+    CMP.hp.param = numericParams.length ? numericParams[0].name : '';
+  }
+  if (CMP.hp.param2 !== 'none' &&
+      (!numericParams.find(p => p.name === CMP.hp.param2) || CMP.hp.param2 === CMP.hp.param)) {
+    CMP.hp.param2 = 'none';
+  }
+  const metricOpts = cmpMetricOptions();
+  if (!metricOpts.find(m => m.key === CMP.hp.y)) CMP.hp.y = metricOpts[0].key;
+
+  if (!spec || !numericParams.length) {
+    panel.innerHTML = `<p class="empty">No numeric hyperparameters to sweep for the selected runs.</p>`;
+    return;
+  }
+
+  const mapSets = [...new Set(details.map(d => d.map_set_id))];
+  const note = mapSets.length > 1
+    ? `<div class="cmp-note">Selected runs span ${mapSets.length} map sets — for a clean sweep, compare runs on the same maps.</div>` : '';
+
+  const is3d = hpIs3d();
+  // Axis meaning: 2D → X=param, Y=metric. 3D → X=param, Y=param 2, Z=metric.
+  const limitDefs = is3d
+    ? [['x', hpParamLabel(CMP.hp.param)], ['y', hpParamLabel(CMP.hp.param2)], ['z', 'metric']]
+    : [['x', hpParamLabel(CMP.hp.param)], ['y', 'metric']];
+
+  panel.innerHTML = `
+    ${note}
+    <div class="row">
+      <div class="field" style="min-width:220px"><label>Algorithm</label>
+        <select id="hp-algo">${algoIds.map(id => {
+          const s = S.registry.find(r => r.id === id);
+          return `<option value="${esc(id)}" ${id === CMP.hp.algo ? 'selected' : ''}>${esc(s ? s.label : id)}</option>`;
+        }).join('')}</select>
+      </div>
+      <div class="field" style="min-width:170px"><label>Sweep parameter (X)</label>
+        <select id="hp-param">${numericParams.map(p =>
+          `<option value="${esc(p.name)}" ${p.name === CMP.hp.param ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}</select>
+      </div>
+      <div class="field" style="min-width:170px"><label>2nd parameter (optional)</label>
+        <select id="hp-param2">
+          <option value="none" ${!is3d ? 'selected' : ''}>— none (2D chart) —</option>
+          ${numericParams.filter(p => p.name !== CMP.hp.param).map(p =>
+            `<option value="${esc(p.name)}" ${p.name === CMP.hp.param2 ? 'selected' : ''}>${esc(p.label)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field" style="min-width:250px"><label>Metric (mean over solved maps)</label>
+        <select id="hp-y">${metricOpts.map(m =>
+          `<option value="${m.key}" ${m.key === CMP.hp.y ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="row" style="align-items:flex-end">
+      ${limitDefs.map(([ax, lbl]) => `
+        <div class="field" style="min-width:150px">
+          <label>${ax.toUpperCase()} · ${esc(lbl)} (min / max)</label>
+          <div style="display:flex;gap:4px">
+            <input type="text" data-hplim="${ax}min" value="${esc(CMP.hp.limits[ax + 'min'])}" placeholder="auto" style="width:70px">
+            <input type="text" data-hplim="${ax}max" value="${esc(CMP.hp.limits[ax + 'max'])}" placeholder="auto" style="width:70px">
+          </div>
+        </div>`).join('')}
+      <button class="btn btn-sm" id="hp-zoom-in" title="Zoom in">＋ zoom</button>
+      <button class="btn btn-sm" id="hp-zoom-out" title="Zoom out">－ zoom</button>
+      <button class="btn btn-sm" id="hp-reset">Reset view</button>
+      <button class="btn btn-sm" id="hp-png">Download PNG (current view, 2×)</button>
+    </div>
+    <div class="graph-wrap">
+      <canvas id="hp-graph" width="920" height="560"></canvas>
+      <div class="graph-legend" id="hp-legend"></div>
+    </div>
+    <div class="bar-note" id="hp-hint"></div>`;
+
+  const clearHpLimits = () => {
+    CMP.hp.limits = { xmin: '', xmax: '', ymin: '', ymax: '', zmin: '', zmax: '' };
+  };
+  $('#hp-algo').addEventListener('change', e => {
+    CMP.hp.algo = e.target.value; CMP.hp.param = ''; CMP.hp.param2 = 'none';
+    clearHpLimits(); renderHpPanel(rows, details);
+  });
+  $('#hp-param').addEventListener('change', e => {
+    CMP.hp.param = e.target.value;
+    if (CMP.hp.param2 === CMP.hp.param) CMP.hp.param2 = 'none';
+    clearHpLimits(); renderHpPanel(rows, details);
+  });
+  $('#hp-param2').addEventListener('change', e => {
+    CMP.hp.param2 = e.target.value;
+    clearHpLimits(); renderHpPanel(rows, details);   // limit boxes change with the mode
+  });
+  $('#hp-y').addEventListener('change', e => { CMP.hp.y = e.target.value; drawHpGraph(rows); });
+  $$('[data-hplim]', panel).forEach(inp => inp.addEventListener('change', () => {
+    CMP.hp.limits[inp.dataset.hplim] = inp.value.trim();
+    drawHpGraph(CMP.lastRows);
+  }));
+  $('#hp-zoom-in').addEventListener('click', () => hpZoom(0.8));
+  $('#hp-zoom-out').addEventListener('click', () => hpZoom(1.25));
+  $('#hp-reset').addEventListener('click', () => {
+    clearHpLimits();
+    CMP.hp.view = { yaw: 0.7, pitch: 0.45, zoom: 1.0 };
+    syncHpLimitInputs();
+    drawHpGraph(CMP.lastRows);
+  });
+  $('#hp-png').addEventListener('click', () => {
+    // Export exactly the current view (limits, rotation, zoom) at 2× resolution.
+    const off = document.createElement('canvas');
+    off.width = 1840; off.height = 1120;
+    drawHpGraph(CMP.lastRows, off);
+    const a = document.createElement('a');
+    a.href = off.toDataURL('image/png');
+    a.download = 'hyperparameter_sweep.png';
+    a.click();
+  });
+
+  drawHpGraph(rows);
+}
+
+function syncHpLimitInputs() {
+  $$('[data-hplim]').forEach(inp => { inp.value = CMP.hp.limits[inp.dataset.hplim]; });
+}
+
+function hpZoom(factor) {
+  if (hpIs3d()) {
+    CMP.hp.view.zoom = Math.max(0.4, Math.min(3, CMP.hp.view.zoom / factor));
+    drawHpGraph(CMP.lastRows);
+    return;
+  }
+  const eff = CMP.hpEffLimits;
+  if (!eff) return;
+  for (const ax of ['x', 'y']) {
+    const [mn, mx] = eff[ax];
+    const c = (mn + mx) / 2, half = (mx - mn) / 2 * factor;
+    CMP.hp.limits[ax + 'min'] = String(+(c - half).toPrecision(6));
+    CMP.hp.limits[ax + 'max'] = String(+(c + half).toPrecision(6));
+  }
+  syncHpLimitInputs();
+  drawHpGraph(CMP.lastRows);
+}
+
+function drawHpGraph(rows, targetCv) {
+  const cv = targetCv || $('#hp-graph');
+  if (!cv) return;
+  const offscreen = !!targetCv;
+  const p1 = CMP.hp.param, p2 = CMP.hp.param2, yKey = CMP.hp.y;
+
+  if (!hpIs3d()) {
+    // 2D: one series per configuration of the *other* params (matched across
+    // runs); X = swept parameter, same-X values averaged.
+    const series = new Map();
+    for (const r of rows) {
+      if (r.algoId !== CMP.hp.algo) continue;
+      const x = Number((r.params || {})[p1]);
+      const y = r.vals[yKey];
+      if (!Number.isFinite(x) || y == null) continue;
+      const rest = { ...r.params };
+      delete rest[p1];
+      const sig = JSON.stringify(rest);
+      if (!series.has(sig)) {
+        series.set(sig, { label: paramsSummary(rest) || 'defaults', algoId: r.algoId, byX: new Map() });
+      }
+      const s = series.get(sig);
+      if (!s.byX.has(x)) s.byX.set(x, []);
+      s.byX.get(x).push(y);
+    }
+    const lines = [...series.values()].map((s, i) => ({
+      ...s, idx: i,
+      pts: [...s.byX.entries()]
+        .map(([x, ys]) => ({ x, y: ys.reduce((a, b) => a + b, 0) / ys.length }))
+        .sort((a, b) => a.x - b.x),
+    }));
+
+    drawSeriesChart(cv, lines, hpParamLabel(p1), axisLabel(yKey), {
+      legendEl: offscreen ? null : $('#hp-legend'),
+      hintEl: offscreen ? null : $('#hp-hint'),
+      hintText: 'One series per configuration of the remaining hyperparameters, across the selected runs. ' +
+                'Scroll or ＋/－ to zoom; limit boxes set exact ranges.',
+      limits: CMP.hp.limits,
+      onEff: eff => { CMP.hpEffLimits = eff; },
+      logicalH: 560,
+    });
+    if (!offscreen) bindHpInteractions(cv);
+    return;
+  }
+
+  // 3D: X = param 1, Y = param 2, Z (vertical) = metric. One color per
+  // configuration of the remaining params; identical (config, x, y) across
+  // runs are averaged.
+  const groups = new Map();
+  for (const r of rows) {
+    if (r.algoId !== CMP.hp.algo) continue;
+    const x = Number((r.params || {})[p1]);
+    const y = Number((r.params || {})[p2]);
+    const z = r.vals[yKey];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || z == null) continue;
+    const rest = { ...r.params };
+    delete rest[p1];
+    delete rest[p2];
+    const sig = JSON.stringify(rest);
+    if (!groups.has(sig)) {
+      groups.set(sig, { label: paramsSummary(rest) || 'defaults', byXY: new Map() });
+    }
+    const g = groups.get(sig);
+    const k = `${x}|${y}`;
+    if (!g.byXY.has(k)) g.byXY.set(k, { x, y, zs: [] });
+    g.byXY.get(k).zs.push(z);
+  }
+  const seriesList = [...groups.values()].map((g, i) => ({ label: g.label, idx: i }));
+  const pts = [];
+  [...groups.values()].forEach((g, i) => {
+    for (const cell of g.byXY.values()) {
+      pts.push({ x: cell.x, y: cell.y, z: cell.zs.reduce((a, b) => a + b, 0) / cell.zs.length,
+                 color: slotHexByIndex(i) });
+    }
+  });
+
+  if (!offscreen) {
+    $('#hp-legend').innerHTML = seriesList.map(s =>
+      `<span class="algo-cell"><span class="chip" style="${slotStyleByIndex(s.idx)}"></span>${esc(s.label)}</span>`).join('');
+    $('#hp-hint').textContent =
+      'X and Y are the two swept hyperparameters; the vertical axis is the metric. ' +
+      'One color per configuration of the remaining params. Drag to rotate, scroll or ＋/－ to zoom.';
+  }
+
+  render3DScatter(cv, pts, {
+    x: { label: hpParamLabel(p1) },
+    y: { label: hpParamLabel(p2) },
+    z: { label: axisLabel(yKey) },
+  }, CMP.hp.view, {
+    limits: CMP.hp.limits,
+    onEff: eff => { CMP.hpEffLimits = eff; },
+  });
+  if (!offscreen) bindHpInteractions(cv);
+}
+
+/* Shared rotatable 3D scatter (normalized cube). pts: [{x,y,z,color,label?}]. */
+function render3DScatter(cv, pts, axesMeta, view, opts = {}) {
+  const LW = 920, LH = 560;
+  const scaleT = cv.width / LW;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(scaleT, 0, 0, scaleT, 0, 0);
+
+  const surface = cssVar('--surface'), ink = cssVar('--ink'), ink2 = cssVar('--ink-2'),
+        muted = cssVar('--muted'), grid = cssVar('--grid'), baseline = cssVar('--baseline');
+
+  ctx.fillStyle = surface;
+  ctx.fillRect(0, 0, LW, LH);
+  ctx.font = '12px system-ui, sans-serif';
+
+  if (!pts.length) {
+    ctx.fillStyle = muted;
+    ctx.fillText('No data points for these settings.', 30, 40);
+    return;
+  }
+
+  const lim = opts.limits || {};
+  const [xmin, xmax] = axisRangeFor(pts.map(p => p.x), lim.xmin, lim.xmax);
+  const [ymin, ymax] = axisRangeFor(pts.map(p => p.y), lim.ymin, lim.ymax);
+  const [zmin, zmax] = axisRangeFor(pts.map(p => p.z), lim.zmin, lim.zmax);
+  if (opts.onEff) opts.onEff({ x: [xmin, xmax], y: [ymin, ymax], z: [zmin, zmax] });
+  const norm = (v, mn, mx) => (v - mn) / (mx - mn) - 0.5;
+
+  const scale = view.zoom * Math.min(LW, LH) * 0.52;
+  const project = (nx, ny, nz) => {
+    const x1 = nx * Math.cos(view.yaw) - ny * Math.sin(view.yaw);
+    const y1 = nx * Math.sin(view.yaw) + ny * Math.cos(view.yaw);
+    const y2 = y1 * Math.cos(view.pitch) - nz * Math.sin(view.pitch);
+    const z2 = y1 * Math.sin(view.pitch) + nz * Math.cos(view.pitch);
+    return [x1 * scale + LW / 2, -z2 * scale + LH / 2, y2];
+  };
+
+  const c = [-0.5, 0.5];
+  const corners = [];
+  for (const a of c) for (const b of c) for (const d of c) corners.push([a, b, d]);
+  const pc = corners.map(k => project(k[0], k[1], k[2]));
+  const edges = [];
+  for (let i = 0; i < 8; i++) for (let j = i + 1; j < 8; j++) {
+    if (corners[i].filter((v, k) => v !== corners[j][k]).length === 1) edges.push([i, j]);
+  }
+  ctx.strokeStyle = grid;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (const [a, b] of edges) { ctx.moveTo(pc[a][0], pc[a][1]); ctx.lineTo(pc[b][0], pc[b][1]); }
+  ctx.stroke();
+
+  const axes = [
+    { label: axesMeta.x.label, from: [-0.5, -0.5, -0.5], to: [0.5, -0.5, -0.5], mn: xmin, mx: xmax },
+    { label: axesMeta.y.label, from: [-0.5, -0.5, -0.5], to: [-0.5, 0.5, -0.5], mn: ymin, mx: ymax },
+    { label: axesMeta.z.label, from: [-0.5, -0.5, -0.5], to: [-0.5, -0.5, 0.5], mn: zmin, mx: zmax },
+  ];
+  ctx.textAlign = 'center';
+  for (const ax of axes) {
+    const a = project(...ax.from), b = project(...ax.to);
+    ctx.strokeStyle = baseline;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    ctx.fillStyle = ink2;
+    ctx.fillText(ax.label, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 8);
+    ctx.fillStyle = muted;
+    ctx.fillText(tickFmt(ax.mn, ax.mx - ax.mn), a[0], a[1] + 14);
+    ctx.fillText(tickFmt(ax.mx, ax.mx - ax.mn), b[0], b[1] + 14);
+  }
+
+  const inR = (v, mn, mx) => v >= mn && v <= mx;
+  const proj = pts
+    .filter(p => inR(p.x, xmin, xmax) && inR(p.y, ymin, ymax) && inR(p.z, zmin, zmax))
+    .map(p => ({
+      ...p, s: project(norm(p.x, xmin, xmax), norm(p.y, ymin, ymax), norm(p.z, zmin, zmax)),
+    })).sort((a, b) => b.s[2] - a.s[2]);
+  for (const p of proj) {
+    ctx.fillStyle = p.color || cssVar('--cat-1');
+    ctx.beginPath();
+    ctx.arc(p.s[0], p.s[1], 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = surface;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    if (p.label) {
+      ctx.fillStyle = ink;
+      ctx.textAlign = 'left';
+      ctx.fillText(p.label, p.s[0] + 10, p.s[1] + 4);
+      ctx.textAlign = 'center';
+    }
+  }
+}
+
+/* Drag-rotate + wheel zoom for the hyperparameter sweep canvas. */
+function bindHpInteractions(cv) {
+  if (cv.dataset.bound === '1') return;
+  cv.dataset.bound = '1';
+  let dragging = false, lx = 0, ly = 0;
+  cv.addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', e => {
+    if (!dragging || !hpIs3d()) return;
+    CMP.hp.view.yaw += (e.clientX - lx) * 0.01;
+    CMP.hp.view.pitch = Math.max(-1.45, Math.min(1.45, CMP.hp.view.pitch + (e.clientY - ly) * 0.01));
+    lx = e.clientX; ly = e.clientY;
+    drawHpGraph(CMP.lastRows);
+  });
+  cv.addEventListener('pointerup', () => { dragging = false; });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (hpIs3d()) {
+      CMP.hp.view.zoom = Math.max(0.4, Math.min(3, CMP.hp.view.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+      drawHpGraph(CMP.lastRows);
+    } else {
+      hpZoom(e.deltaY < 0 ? 0.85 : 1.18);
+    }
+  }, { passive: false });
 }
 
 /* ---- metric graph: 2D scatter or rotatable 3D scatter, canvas-rendered ---- */
@@ -1407,6 +1922,13 @@ function slotHexByIndex(i) {
   return cssVar(`--cat-${i % 8 + 1}`) || '#2a78d6';
 }
 
+/* Tick label precision adapted to the axis span (avoids "0.00 0.00 0.01 …"). */
+function tickFmt(v, span) {
+  if (!Number.isFinite(v)) return '';
+  const d = span >= 100 ? 0 : span >= 10 ? 1 : span >= 1 ? 2 : span >= 0.1 ? 3 : span >= 0.01 ? 4 : 5;
+  return Number(v.toFixed(d)).toString();
+}
+
 function niceTicks(min, max, n = 5) {
   if (!(max > min)) { max = min + 1; }
   const span = max - min;
@@ -1419,11 +1941,32 @@ function niceTicks(min, max, n = 5) {
   return ticks;
 }
 
-function drawCompareGraph(rows) {
-  const cv = $('#cmp-graph');
+/* Resolve axis range: manual limit strings override the autofit of `vals`. */
+function axisRangeFor(vals, mnStr, mxStr) {
+  let mn = Math.min(...vals), mx = Math.max(...vals);
+  if (mn === mx) { mn -= 1; mx += 1; }
+  const padv = (mx - mn) * 0.08;
+  let lo = mn - padv, hi = mx + padv;
+  const pmn = parseFloat(mnStr), pmx = parseFloat(mxStr);
+  if (Number.isFinite(pmn)) lo = pmn;
+  if (Number.isFinite(pmx)) hi = pmx;
+  if (hi <= lo) hi = lo + 1;
+  return [lo, hi];
+}
+
+/* All charts render against a logical size and scale to the target canvas, so
+   the PNG export can redraw the exact current view at higher resolution. */
+function drawCompareGraph(rows, targetCv) {
+  const cv = targetCv || $('#cmp-graph');
   if (!cv) return;
-  if (CMP.graph.mode === 'line') { drawLineGraph(rows, cv); return; }
+  const offscreen = !!targetCv;
+  if (CMP.graph.mode === 'line') { drawLineGraph(rows, cv, offscreen); return; }
+
+  const LW = 920, LH = 560;
+  const scaleT = cv.width / LW;
   const ctx = cv.getContext('2d');
+  ctx.setTransform(scaleT, 0, 0, scaleT, 0, 0);
+
   const xs = CMP.graph.x, ys = CMP.graph.y, zs = CMP.graph.z;
   const is3d = zs !== 'none';
 
@@ -1435,22 +1978,23 @@ function drawCompareGraph(rows) {
     }))
     .filter(p => p.x != null && p.y != null && (!is3d || p.z != null));
 
-  const legend = $('#graph-legend');
-  const algosPresent = [...new Set(pts.map(p => p.algoId))];
-  legend.innerHTML = algosPresent.map(id => {
-    const spec = S.registry.find(r => r.id === id);
-    return `<span class="algo-cell"><span class="chip" style="${chipStyle(id)}"></span>${esc(spec ? spec.label : id)}</span>`;
-  }).join('');
-
-  $('#graph-hint').textContent = is3d
-    ? 'Each point is one run × algorithm instance. Drag to rotate, scroll to zoom. Axes are normalized; labels show real values.'
-    : 'Each point is one run × algorithm instance.';
+  if (!offscreen) {
+    const legend = $('#graph-legend');
+    const algosPresent = [...new Set(pts.map(p => p.algoId))];
+    legend.innerHTML = algosPresent.map(id => {
+      const spec = S.registry.find(r => r.id === id);
+      return `<span class="algo-cell"><span class="chip" style="${chipStyle(id)}"></span>${esc(spec ? spec.label : id)}</span>`;
+    }).join('');
+    $('#graph-hint').textContent = is3d
+      ? 'Each point is one run × algorithm instance. Drag to rotate, scroll or ＋/－ to zoom. Axes are normalized; labels show real values.'
+      : 'Each point is one run × algorithm instance. Scroll or ＋/－ to zoom; edit the limit boxes for exact ranges.';
+  }
 
   const surface = cssVar('--surface'), ink = cssVar('--ink'), ink2 = cssVar('--ink-2'),
         muted = cssVar('--muted'), grid = cssVar('--grid'), baseline = cssVar('--baseline');
 
   ctx.fillStyle = surface;
-  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.fillRect(0, 0, LW, LH);
   ctx.font = '12px system-ui, sans-serif';
 
   if (!pts.length) {
@@ -1459,18 +2003,14 @@ function drawCompareGraph(rows) {
     return;
   }
 
-  const range = arr => {
-    let mn = Math.min(...arr), mx = Math.max(...arr);
-    if (mn === mx) { mn -= 1; mx += 1; }
-    const pad = (mx - mn) * 0.08;
-    return [mn - pad, mx + pad];
-  };
+  const L = CMP.limits;
 
   if (!is3d) {
     const M = { l: 70, r: 24, t: 20, b: 52 };
-    const W = cv.width - M.l - M.r, H = cv.height - M.t - M.b;
-    const [xmin, xmax] = range(pts.map(p => p.x));
-    const [ymin, ymax] = range(pts.map(p => p.y));
+    const W = LW - M.l - M.r, H = LH - M.t - M.b;
+    const [xmin, xmax] = axisRangeFor(pts.map(p => p.x), L.xmin, L.xmax);
+    const [ymin, ymax] = axisRangeFor(pts.map(p => p.y), L.ymin, L.ymax);
+    CMP.lastEffLimits = { x: [xmin, xmax], y: [ymin, ymax] };
     const px = v => M.l + (v - xmin) / (xmax - xmin) * W;
     const py = v => M.t + H - (v - ymin) / (ymax - ymin) * H;
 
@@ -1478,27 +2018,34 @@ function drawCompareGraph(rows) {
     ctx.lineWidth = 1;
     ctx.fillStyle = muted;
     for (const t of niceTicks(xmin, xmax)) {
+      if (t < xmin || t > xmax) continue;
       ctx.beginPath(); ctx.moveTo(px(t), M.t); ctx.lineTo(px(t), M.t + H); ctx.stroke();
       ctx.textAlign = 'center';
-      ctx.fillText(fmt(t, 2), px(t), M.t + H + 18);
+      ctx.fillText(tickFmt(t, xmax - xmin), px(t), M.t + H + 18);
     }
     for (const t of niceTicks(ymin, ymax)) {
+      if (t < ymin || t > ymax) continue;
       ctx.beginPath(); ctx.moveTo(M.l, py(t)); ctx.lineTo(M.l + W, py(t)); ctx.stroke();
       ctx.textAlign = 'right';
-      ctx.fillText(fmt(t, 2), M.l - 8, py(t) + 4);
+      ctx.fillText(tickFmt(t, ymax - ymin), M.l - 8, py(t) + 4);
     }
     ctx.strokeStyle = baseline;
     ctx.strokeRect(M.l, M.t, W, H);
 
     ctx.fillStyle = ink2;
     ctx.textAlign = 'center';
-    ctx.fillText(axisLabel(xs), M.l + W / 2, cv.height - 12);
+    ctx.fillText(axisLabel(xs), M.l + W / 2, LH - 12);
     ctx.save();
     ctx.translate(16, M.t + H / 2);
     ctx.rotate(-Math.PI / 2);
     ctx.fillText(axisLabel(ys), 0, 0);
     ctx.restore();
 
+    // Clip marks to the plot area so zoomed-out points don't spill over axes.
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(M.l, M.t, W, H);
+    ctx.clip();
     for (const p of pts) {
       ctx.fillStyle = chipHex(p.algoId);
       ctx.beginPath();
@@ -1511,22 +2058,25 @@ function drawCompareGraph(rows) {
       ctx.textAlign = 'left';
       ctx.fillText(p.label, px(p.x) + 10, py(p.y) + 4);
     }
+    ctx.restore();
+    if (!offscreen) bindGraphInteractions(cv);
     return;
   }
 
   // ---- 3D scatter: normalize each axis to a unit cube, rotate/zoom ----
-  const [xmin, xmax] = range(pts.map(p => p.x));
-  const [ymin, ymax] = range(pts.map(p => p.y));
-  const [zmin, zmax] = range(pts.map(p => p.z));
+  const [xmin, xmax] = axisRangeFor(pts.map(p => p.x), L.xmin, L.xmax);
+  const [ymin, ymax] = axisRangeFor(pts.map(p => p.y), L.ymin, L.ymax);
+  const [zmin, zmax] = axisRangeFor(pts.map(p => p.z), L.zmin, L.zmax);
+  CMP.lastEffLimits = { x: [xmin, xmax], y: [ymin, ymax], z: [zmin, zmax] };
   const norm = (v, mn, mx) => (v - mn) / (mx - mn) - 0.5;
 
-  const scale = GVIEW.zoom * Math.min(cv.width, cv.height) * 0.52;
+  const scale = GVIEW.zoom * Math.min(LW, LH) * 0.52;
   const project = (nx, ny, nz) => {
     const x1 = nx * Math.cos(GVIEW.yaw) - ny * Math.sin(GVIEW.yaw);
     const y1 = nx * Math.sin(GVIEW.yaw) + ny * Math.cos(GVIEW.yaw);
     const y2 = y1 * Math.cos(GVIEW.pitch) - nz * Math.sin(GVIEW.pitch);
     const z2 = y1 * Math.sin(GVIEW.pitch) + nz * Math.cos(GVIEW.pitch);
-    return [x1 * scale + cv.width / 2, -z2 * scale + cv.height / 2, y2];
+    return [x1 * scale + LW / 2, -z2 * scale + LH / 2, y2];
   };
 
   // cube edges
@@ -1561,14 +2111,17 @@ function drawCompareGraph(rows) {
     ctx.fillStyle = ink2;
     ctx.fillText(ax.label, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2 - 8);
     ctx.fillStyle = muted;
-    ctx.fillText(fmt(ax.mn, 2), a[0], a[1] + 14);
-    ctx.fillText(fmt(ax.mx, 2), b[0], b[1] + 14);
+    ctx.fillText(tickFmt(ax.mn, ax.mx - ax.mn), a[0], a[1] + 14);
+    ctx.fillText(tickFmt(ax.mx, ax.mx - ax.mn), b[0], b[1] + 14);
   }
 
-  // points, far → near
-  const proj = pts.map(p => ({
-    ...p, s: project(norm(p.x, xmin, xmax), norm(p.y, ymin, ymax), norm(p.z, zmin, zmax)),
-  })).sort((a, b) => b.s[2] - a.s[2]);
+  // points, far → near; points outside manual limits are dropped
+  const inR = (v, mn, mx) => v >= mn && v <= mx;
+  const proj = pts
+    .filter(p => inR(p.x, xmin, xmax) && inR(p.y, ymin, ymax) && inR(p.z, zmin, zmax))
+    .map(p => ({
+      ...p, s: project(norm(p.x, xmin, xmax), norm(p.y, ymin, ymax), norm(p.z, zmin, zmax)),
+    })).sort((a, b) => b.s[2] - a.s[2]);
   for (const p of proj) {
     ctx.fillStyle = chipHex(p.algoId);
     ctx.beginPath();
@@ -1582,42 +2135,40 @@ function drawCompareGraph(rows) {
     ctx.fillText(p.label, p.s[0] + 10, p.s[1] + 4);
   }
 
-  // bind rotate/zoom once
-  if (!GVIEW.bound || cv.dataset.bound !== '1') {
-    cv.dataset.bound = '1';
-    let dragging = false, lx = 0, ly = 0;
-    cv.addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
-    cv.addEventListener('pointermove', e => {
-      if (!dragging || CMP.graph.z === 'none') return;
-      GVIEW.yaw += (e.clientX - lx) * 0.01;
-      GVIEW.pitch = Math.max(-1.45, Math.min(1.45, GVIEW.pitch + (e.clientY - ly) * 0.01));
-      lx = e.clientX; ly = e.clientY;
-      drawCompareGraph(rows);
-    });
-    cv.addEventListener('pointerup', () => { dragging = false; });
-    cv.addEventListener('wheel', e => {
-      if (CMP.graph.z === 'none') return;
-      e.preventDefault();
+  if (!offscreen) bindGraphInteractions(cv);
+}
+
+/* Drag-rotate (3D) + wheel zoom (2D limits / 3D projection) — bound once. */
+function bindGraphInteractions(cv) {
+  if (cv.dataset.bound === '1') return;
+  cv.dataset.bound = '1';
+  let dragging = false, lx = 0, ly = 0;
+  cv.addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
+  cv.addEventListener('pointermove', e => {
+    if (!dragging || !is3dGraph()) return;
+    GVIEW.yaw += (e.clientX - lx) * 0.01;
+    GVIEW.pitch = Math.max(-1.45, Math.min(1.45, GVIEW.pitch + (e.clientY - ly) * 0.01));
+    lx = e.clientX; ly = e.clientY;
+    drawCompareGraph(CMP.lastRows);
+  });
+  cv.addEventListener('pointerup', () => { dragging = false; });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (is3dGraph()) {
       GVIEW.zoom = Math.max(0.4, Math.min(3, GVIEW.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
-      drawCompareGraph(rows);
-    }, { passive: false });
-  }
+      drawCompareGraph(CMP.lastRows);
+    } else {
+      graphZoom(e.deltaY < 0 ? 0.85 : 1.18);
+    }
+  }, { passive: false });
 }
 
 /* Line graph: Y metric vs a run-level map property; one line per algorithm
    configuration (same algorithm id + identical params grouped across runs).
    Multiple runs at the same X are averaged. */
-function drawLineGraph(rows, cv) {
-  const ctx = cv.getContext('2d');
+function drawLineGraph(rows, cv, offscreen) {
   const xs = CMP.graph.x, ys = CMP.graph.y;
-  const surface = cssVar('--surface'), ink = cssVar('--ink'), ink2 = cssVar('--ink-2'),
-        muted = cssVar('--muted'), grid = cssVar('--grid'), baseline = cssVar('--baseline');
 
-  ctx.fillStyle = surface;
-  ctx.fillRect(0, 0, cv.width, cv.height);
-  ctx.font = '12px system-ui, sans-serif';
-
-  // Group rows into series by algorithm configuration.
   const series = new Map();
   for (const r of rows) {
     const x = r.vals[xs], y = r.vals[ys];
@@ -1635,26 +2186,56 @@ function drawLineGraph(rows, cv) {
       .sort((a, b) => a.x - b.x),
   }));
 
-  const legend = $('#graph-legend');
-  legend.innerHTML = lines.map(l =>
-    `<span class="algo-cell"><span class="chip" style="${slotStyleByIndex(l.idx)}"></span>${esc(l.label)}</span>`).join('');
-  $('#graph-hint').textContent =
-    'One line per algorithm configuration, across the selected runs. Points at the same X are averaged.';
+  drawSeriesChart(cv, lines, axisLabel(xs), axisLabel(ys), {
+    legendEl: offscreen ? null : $('#graph-legend'),
+    hintEl: offscreen ? null : $('#graph-hint'),
+    hintText: 'One line per algorithm configuration, across the selected runs. ' +
+              'Points at the same X are averaged. Scroll or ＋/－ to zoom; limit boxes set exact ranges.',
+    limits: CMP.limits,
+    storeEff: true,
+    logicalH: 560,
+  });
+  if (!offscreen) bindGraphInteractions(cv);
+}
+
+/* Shared multi-series line chart (used by the metric line graph and the
+   hyperparameter sweep). Renders at a logical size scaled to the canvas so
+   PNG exports can redraw the identical view at higher resolution. */
+function drawSeriesChart(cv, lines, xLabelText, yLabelText, opts = {}) {
+  const LW = 920, LH = opts.logicalH || 560;
+  const scaleT = cv.width / LW;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(scaleT, 0, 0, scaleT, 0, 0);
+
+  const surface = cssVar('--surface'), ink = cssVar('--ink'), ink2 = cssVar('--ink-2'),
+        muted = cssVar('--muted'), grid = cssVar('--grid'), baseline = cssVar('--baseline');
+
+  ctx.fillStyle = surface;
+  ctx.fillRect(0, 0, LW, LH);
+  ctx.font = '12px system-ui, sans-serif';
+
+  if (opts.legendEl) {
+    opts.legendEl.innerHTML = lines.map(l =>
+      `<span class="algo-cell"><span class="chip" style="${slotStyleByIndex(l.idx)}"></span>${esc(l.label)}</span>`).join('');
+  }
+  if (opts.hintEl) opts.hintEl.textContent = opts.hintText || '';
 
   if (!lines.length) {
     ctx.fillStyle = muted;
-    ctx.fillText('No data points — the selected runs have no values for these axes.', 30, 40);
+    ctx.fillText('No data points — nothing matches these settings.', 30, 40);
     return;
   }
 
   const allX = lines.flatMap(l => l.pts.map(p => p.x));
   const allY = lines.flatMap(l => l.pts.map(p => p.y));
-  const pad = (mn, mx) => { if (mn === mx) { mn -= 1; mx += 1; } const p = (mx - mn) * 0.08; return [mn - p, mx + p]; };
-  const [xmin, xmax] = pad(Math.min(...allX), Math.max(...allX));
-  const [ymin, ymax] = pad(Math.min(...allY), Math.max(...allY));
+  const lim = opts.limits || {};
+  const [xmin, xmax] = axisRangeFor(allX, lim.xmin, lim.xmax);
+  const [ymin, ymax] = axisRangeFor(allY, lim.ymin, lim.ymax);
+  if (opts.storeEff) CMP.lastEffLimits = { x: [xmin, xmax], y: [ymin, ymax] };
+  if (opts.onEff) opts.onEff({ x: [xmin, xmax], y: [ymin, ymax] });
 
   const M = { l: 70, r: 190, t: 20, b: 52 };   // wide right margin for line-end labels
-  const W = cv.width - M.l - M.r, H = cv.height - M.t - M.b;
+  const W = LW - M.l - M.r, H = LH - M.t - M.b;
   const px = v => M.l + (v - xmin) / (xmax - xmin) * W;
   const py = v => M.t + H - (v - ymin) / (ymax - ymin) * H;
 
@@ -1662,11 +2243,13 @@ function drawLineGraph(rows, cv) {
   ctx.lineWidth = 1;
   ctx.fillStyle = muted;
   for (const t of niceTicks(xmin, xmax)) {
+    if (t < xmin || t > xmax) continue;
     ctx.beginPath(); ctx.moveTo(px(t), M.t); ctx.lineTo(px(t), M.t + H); ctx.stroke();
     ctx.textAlign = 'center';
     ctx.fillText(fmt(t, 2), px(t), M.t + H + 18);
   }
   for (const t of niceTicks(ymin, ymax)) {
+    if (t < ymin || t > ymax) continue;
     ctx.beginPath(); ctx.moveTo(M.l, py(t)); ctx.lineTo(M.l + W, py(t)); ctx.stroke();
     ctx.textAlign = 'right';
     ctx.fillText(fmt(t, 2), M.l - 8, py(t) + 4);
@@ -1676,15 +2259,18 @@ function drawLineGraph(rows, cv) {
 
   ctx.fillStyle = ink2;
   ctx.textAlign = 'center';
-  ctx.fillText(axisLabel(xs), M.l + W / 2, cv.height - 12);
+  ctx.fillText(xLabelText, M.l + W / 2, LH - 12);
   ctx.save();
   ctx.translate(16, M.t + H / 2);
   ctx.rotate(-Math.PI / 2);
-  ctx.fillText(axisLabel(ys), 0, 0);
+  ctx.fillText(yLabelText, 0, 0);
   ctx.restore();
 
-  // Lines: 2px stroke, 8px markers with a 2px surface ring, label at line end.
-  const usedLabelYs = [];
+  // Lines clipped to the plot area; labels drawn outside the clip.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(M.l, M.t, W, H);
+  ctx.clip();
   for (const l of lines) {
     const color = slotHexByIndex(l.idx);
     ctx.strokeStyle = color;
@@ -1703,13 +2289,18 @@ function drawLineGraph(rows, cv) {
       ctx.lineWidth = 2;
       ctx.stroke();
     }
+  }
+  ctx.restore();
+
+  const usedLabelYs = [];
+  for (const l of lines) {
     const last = l.pts[l.pts.length - 1];
-    let ly = py(last.y) + 4;
+    let ly = Math.max(M.t + 8, Math.min(M.t + H - 4, py(last.y) + 4));
     while (usedLabelYs.some(u => Math.abs(u - ly) < 14)) ly += 14;   // avoid label collisions
     usedLabelYs.push(ly);
     ctx.fillStyle = ink;
     ctx.textAlign = 'left';
-    ctx.fillText(l.label.slice(0, 34), px(last.x) + 10, ly);
+    ctx.fillText(l.label.slice(0, 34), Math.min(px(last.x), M.l + W) + 10, ly);
   }
 }
 

@@ -220,6 +220,26 @@ def api_cancel_run(run_id):
     return jsonify({'status': manifest['status']})
 
 
+@app.post('/api/runs/<run_id>/graph_label')
+def api_set_graph_label(run_id):
+    """Set/clear the custom chart label of one algorithm instance.
+
+    Cosmetic only — the instance's id and hyperparameters are untouched.
+    Body: {algorithm_key, graph_label}; empty graph_label clears it.
+    """
+    _check(run_id)
+    body = request.get_json(force=True)
+    key = body.get('algorithm_key')
+    manifest = storage.get_run(run_id)
+    entry = next((a for a in (manifest.get('algorithms') or [])
+                  if (a.get('key') or a.get('id')) == key), None)
+    if entry is None:
+        raise KeyError(f'no algorithm instance {key!r} in this run')
+    entry['graph_label'] = (str(body.get('graph_label') or '').strip() or None)
+    storage.save_run_manifest(manifest)
+    return jsonify({'algorithm_key': key, 'graph_label': entry['graph_label']})
+
+
 @app.post('/api/runs/<run_id>/metrics')
 def api_recompute_metrics(run_id):
     """Recompute smoothness metrics from stored paths — no planner re-run.

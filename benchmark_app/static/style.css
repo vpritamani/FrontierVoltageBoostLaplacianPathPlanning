@@ -30,29 +30,41 @@
   --good-text:       #006300;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --page:     #0d0d0d;
-    --surface:  #1a1a19;
-    --ink:      #ffffff;
-    --ink-2:    #c3c2b7;
-    --muted:    #898781;
-    --grid:     #2c2c2a;
-    --baseline: #383835;
-    --border:   rgba(255, 255, 255, 0.10);
+/* Theme is attribute-driven so the top-right toggle can override the system
+   preference; app.js sets data-theme from localStorage ?? prefers-color-scheme. */
+:root[data-theme="dark"] {
+  --page:     #0d0d0d;
+  --surface:  #1a1a19;
+  --ink:      #ffffff;
+  --ink-2:    #c3c2b7;
+  --muted:    #898781;
+  --grid:     #2c2c2a;
+  --baseline: #383835;
+  --border:   rgba(255, 255, 255, 0.10);
 
-    --cat-1: #3987e5;
-    --cat-2: #199e70;
-    --cat-3: #c98500;
-    --cat-4: #008300;
-    --cat-5: #9085e9;
-    --cat-6: #e66767;
-    --cat-7: #d55181;
-    --cat-8: #d95926;
+  --cat-1: #3987e5;
+  --cat-2: #199e70;
+  --cat-3: #c98500;
+  --cat-4: #008300;
+  --cat-5: #9085e9;
+  --cat-6: #e66767;
+  --cat-7: #d55181;
+  --cat-8: #d95926;
 
-    --good-text: #0ca30c;
-  }
+  --good-text: #0ca30c;
 }
+
+.theme-toggle {
+  border: 1px solid var(--grid);
+  background: var(--page);
+  color: var(--ink-2);
+  border-radius: 16px;
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.theme-toggle:hover { color: var(--ink); border-color: var(--baseline); }
 
 * { box-sizing: border-box; }
 
