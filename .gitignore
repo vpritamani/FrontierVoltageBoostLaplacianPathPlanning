@@ -1,0 +1,19 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# pip editable install artifacts
+*.egg-info/
+*.egg
+
+# Benchmark app data (map sets + run results)
+Benchmark Data/
+
+# Generated map files
+*.npy
+start_end_points.csv
+
+# IDE / tool directories
+.qodo/
+.venv/
+.env

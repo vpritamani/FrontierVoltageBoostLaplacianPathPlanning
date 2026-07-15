@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Path Planning Benchmark</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <h1>Path Planning Benchmark</h1>
+    <div id="jobs-indicator" class="jobs-indicator hidden"></div>
+    <div style="flex:1"></div>
+    <button id="theme-toggle" class="theme-toggle" title="Toggle light / dark mode">◐ theme</button>
+  </div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="run">Run</button>
+    <button class="tab" data-tab="maps">Map Sets</button>
+    <button class="tab" data-tab="results">Results</button>
+    <button class="tab" data-tab="compare">Compare</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-run" class="tab-panel"></section>
+  <section id="tab-maps" class="tab-panel hidden"></section>
+  <section id="tab-results" class="tab-panel hidden"></section>
+  <section id="tab-compare" class="tab-panel hidden"></section>
+</main>
+
+<div id="modal-backdrop" class="modal-backdrop hidden">
+  <div class="modal" role="dialog" aria-modal="true">
+    <h2 id="modal-title"></h2>
+    <div id="modal-body"></div>
+    <div class="modal-actions">
+      <button id="modal-cancel" class="btn">Cancel</button>
+      <button id="modal-confirm" class="btn btn-danger">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
