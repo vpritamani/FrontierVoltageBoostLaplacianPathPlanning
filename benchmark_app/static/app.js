@@ -17,9 +17,9 @@ const S = {
 /* Run-form state — survives tab switches and re-renders. */
 const F = {
   source: 'new',                    // 'new' | 'existing'
-  gen: { name: '', mode: '2', width: 100, height: 100, depth: 30,
+  gen: { name: '', mode: '2', width: 128, height: 128, depth: 128,
          shape: '12,12,12,8',
-         num_maps: 5, obstacles_min: 5, obstacles_max: 30, seed: '' },
+         num_maps: 10, obstacles_min: 5, obstacles_max: 30, seed: 1 },
   mapSetId: null,
   mapSel: null,                     // null = all maps, else Set of map names
   algoList: [],                     // [{id, params}] — instances, duplicates allowed
@@ -52,7 +52,8 @@ const steerCache = new Map();
 const LAB = { theta: 30, sweep: 5, preview: null, runId: null };
 
 /* Cross-run compare state. */
-const CMP = { sel: new Set(), metric: 'steer|30|5', cache: new Map(),
+const CMP = { sel: new Set(), excluded: new Set(),   // excluded: `runId|algoKey`
+              metric: 'steer|30|5', cache: new Map(),
               graph: { mode: 'scatter', x: 'mean_time_s', y: 'steer|30|5', z: 'none' },
               // manual axis limits ('' = autofit) — editable + wheel-zoomable
               limits: { xmin: '', xmax: '', ymin: '', ymax: '', zmin: '', zmax: '' },
@@ -132,6 +133,32 @@ function paramsSummary(params) {
 /* Instance key of a result record or manifest algorithm entry (back-compat). */
 function recKey(r) { return r.algorithm_key || r.algorithm_id; }
 function algoKey(a) { return a.key || a.id; }
+
+/* Auto-incrementing default name: "prefix N" for the smallest free N. */
+function nextName(prefix, existing) {
+  const taken = new Set(existing || []);
+  let n = 1;
+  while (taken.has(`${prefix} ${n}`)) n++;
+  return `${prefix} ${n}`;
+}
+function nextRunName() { return nextName('run', S.runs.map(r => r.name)); }
+function nextSetName() { return nextName('set', S.mapSets.map(m => m.name)); }
+
+/* Compare-view label: a user's custom graph label replaces everything;
+   otherwise the default is "runName · algorithm (hyperparameters)". */
+function cmpLabel(row) {
+  if (row.graphLabel) return row.graphLabel;
+  const ps = paramsSummary(row.params);
+  return `${row.runName} · ${row.algoName}${ps ? ' (' + ps + ')' : ''}`;
+}
+
+/* Hyperparameter-sweep series label: the distinct custom graph labels of the
+   instances making up the series (a series groups instances that share the
+   non-swept params), else the auto params-summary fallback. */
+function hpLabel(customLabels, fallback) {
+  const distinct = [...new Set((customLabels || []).filter(Boolean))];
+  return distinct.length ? distinct.join(' / ') : fallback;
+}
 
 function systemLine() {
   const s = S.system;
@@ -291,6 +318,7 @@ function currentDims() {
 function renderRunTab() {
   const readySets = S.mapSets.filter(m => m.status === 'ready');
   if (F.source === 'existing' && !F.mapSetId && readySets.length) F.mapSetId = readySets[0].id;
+  if (!F.runName) F.runName = nextRunName();   // required, auto-incrementing default
 
   const dims = currentDims();
   const root = $('#tab-run');
@@ -313,8 +341,8 @@ function renderRunTab() {
       <h2>3 · Execute</h2>
       <div class="row">
         <div class="field" style="min-width:220px">
-          <label>Run name (optional)</label>
-          <input type="text" id="run-name" value="${esc(F.runName)}" placeholder="e.g. fvb sweep, 100x100">
+          <label>Run name</label>
+          <input type="text" id="run-name" value="${esc(F.runName)}" placeholder="run 1">
         </div>
         <div class="field">
           <label>Per-solve timeout (s)</label>
@@ -357,13 +385,14 @@ function renderMapsConfig() {
   const box = $('#maps-config');
   if (F.source === 'new') {
     const g = F.gen;
+    if (!g.name) g.name = nextSetName();   // required, auto-incrementing default
     const is3d = g.mode === '3';
     const isNd = g.mode === 'nd';
     box.innerHTML = `
       <div class="row">
         <div class="field" style="min-width:200px">
-          <label>Set name (optional)</label>
-          <input type="text" data-g="name" value="${esc(g.name)}" placeholder="e.g. dense 100x100">
+          <label>Set name</label>
+          <input type="text" data-g="name" value="${esc(g.name)}" placeholder="set 1">
         </div>
         <div class="field"><label>Dimensions</label>
           <select data-g="mode">
@@ -578,14 +607,16 @@ async function startRun() {
 
     // Metric hyperparameters are deliberately not set here — stored metrics use
     // the defaults (θ=30, sweep=5) and are recomputable at any θ afterwards.
+    // Run/set names are required; fall back to the auto-incrementing default.
     const body = {
-      name: F.runName || null,
+      name: (F.runName || '').trim() || nextRunName(),
       solve_timeout_s: F.timeout,
       parallel_workers: Math.max(1, F.workers || 1),
       algorithms: algos,
     };
     if (F.source === 'new') {
       const g = { ...F.gen };
+      g.name = (F.gen.name || '').trim() || nextSetName();
       if (F.gen.mode === 'nd') {
         g.shape = String(F.gen.shape).split(',').map(s => Number(s.trim())).filter(n => n > 0);
         if (g.shape.length < 4) throw new Error('ND shape needs at least 4 sizes (use 2D/3D modes otherwise).');
@@ -605,6 +636,9 @@ async function startRun() {
 
     const res = await api('/api/runs', { method: 'POST', body: JSON.stringify(body) });
     await refreshLists();
+    // Clear the names so the next visit to the Run tab picks the next number.
+    F.runName = '';
+    F.gen.name = '';
     ensurePolling();
     renderJobsIndicator();
     switchTab('results');
@@ -648,9 +682,10 @@ function renderMapSets() {
         ${ms.gen_params.seed != null ? `· seed ${ms.gen_params.seed}` : ''}<br>
         <span style="color:var(--muted)">${esc(ms.id)} · ${esc(ms.created)}</span>
       </div>
-      <div class="ms-thumbs">${thumbs}</div>
+      <div class="ms-thumbs${ms.dims === 2 && ms.status === 'ready' ? ' clickable' : ''}"${ms.dims === 2 && ms.status === 'ready' ? ` data-viewimgs="${esc(ms.id)}" title="View all images"` : ''}>${thumbs}</div>
       <div class="ms-actions">
         <button class="btn btn-sm" data-runon="${esc(ms.id)}" ${ms.status !== 'ready' ? 'disabled' : ''}>Run on this set</button>
+        ${ms.dims === 2 ? `<button class="btn btn-sm" data-viewimgs="${esc(ms.id)}" ${ms.status !== 'ready' ? 'disabled' : ''}>View images</button>` : ''}
         ${ms.dims >= 3 ? `<button class="btn btn-sm" data-view3d="${esc(ms.id)}" ${ms.status !== 'ready' ? 'disabled' : ''}>View maps</button>` : ''}
         <button class="btn btn-sm btn-danger" data-del="${esc(ms.id)}">Delete…</button>
       </div>
@@ -666,7 +701,79 @@ function renderMapSets() {
     const ms = S.mapSets.find(m => m.id === b.dataset.view3d);
     if (ms) openViewerModal(ms, null, []);
   }));
+  $$('[data-viewimgs]', root).forEach(b => b.addEventListener('click', () => {
+    const ms = S.mapSets.find(m => m.id === b.dataset.viewimgs);
+    if (ms) openMapSetGallery(ms);
+  }));
   $$('[data-del]', root).forEach(b => b.addEventListener('click', () => deleteMapSetFlow(b.dataset.del)));
+}
+
+/* ---- Image gallery (all images in a 2D map set) + downloadable lightbox ---- */
+
+/* Fetch the image as a blob and save it under an exact filename — a plain
+   `<a download>` on a same-origin API URL is served with the URL's own name,
+   which would collide across algorithms for the same map. */
+async function downloadImage(src, filename) {
+  try {
+    const blob = await (await fetch(src)).blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    alert('Download failed: ' + e.message);
+  }
+}
+
+function openImageLightbox(src, downloadName, backFn) {
+  showModal({
+    title: downloadName,
+    wide: true,
+    hideConfirm: true,
+    cancelLabel: 'Close',
+    bodyHTML: `
+      <div class="lightbox"><img src="${esc(src)}" alt="${esc(downloadName)}"></div>
+      <div class="lightbox-actions">
+        ${backFn ? `<button class="btn btn-sm" id="lb-back">← Back to gallery</button>` : ''}
+        <button class="btn btn-sm btn-primary" id="lb-download">Download PNG</button>
+      </div>`,
+    onOpen: () => {
+      const back = $('#lb-back');
+      if (back && backFn) back.addEventListener('click', backFn);
+      $('#lb-download').addEventListener('click', () => downloadImage(src, downloadName));
+    },
+  });
+}
+
+function openMapSetGallery(ms) {
+  const imgs = (ms.maps || []).map(m => ({
+    stem: m.stem,
+    src: `/api/map_sets/${ms.id}/thumb/${m.stem}.png`,
+    name: `${ms.name}_${m.stem}.png`,
+  }));
+  showModal({
+    title: `${ms.name} · ${imgs.length} image(s)`,
+    wide: true,
+    hideConfirm: true,
+    cancelLabel: 'Close',
+    bodyHTML: imgs.length
+      ? `<div class="gallery-grid">${imgs.map((im, i) =>
+          `<figure class="gallery-item" data-gi="${i}" title="Click to enlarge / download">
+             <img loading="lazy" src="${esc(im.src)}" alt="${esc(im.stem)}">
+             <figcaption>${esc(im.stem)}</figcaption>
+           </figure>`).join('')}</div>`
+      : `<p class="empty">This map set has no images.</p>`,
+    onOpen: () => {
+      $$('[data-gi]', $('#modal-body')).forEach(el => el.addEventListener('click', () => {
+        const im = imgs[Number(el.dataset.gi)];
+        openImageLightbox(im.src, im.name, () => openMapSetGallery(ms));
+      }));
+    },
+  });
 }
 
 function importMapSetFlow() {
@@ -907,7 +1014,9 @@ function renderRunDetail() {
             ${recs.map(r => {
               const entry = algos.find(a => algoKey(a) === recKey(r)) || { id: r.algorithm_id, label: r.algorithm_label, params: r.params };
               return `<figure>
-              <img loading="lazy" src="/api/runs/${esc(d.id)}/image/${esc(recKey(r))}/${esc(stem)}_path.png" alt="">
+              <img class="clickable-img" loading="lazy" title="Click to enlarge / download"
+                   src="/api/runs/${esc(d.id)}/image/${esc(recKey(r))}/${esc(stem)}_path.png"
+                   data-name="${esc(stem)}_${esc(r.algorithm_id)}_path.png" alt="">
               <figcaption><span class="chip" style="${chipStyle(r.algorithm_id)}"></span>${esc(instLabel(algos, entry))}</figcaption>
             </figure>`;
             }).join('')}
@@ -1062,6 +1171,9 @@ function renderRunDetail() {
   if (v3dOpen) v3dOpen.addEventListener('click', () => {
     openRunViewer(d, $('#v3d-map').value);
   });
+
+  $$('.clickable-img', root).forEach(el => el.addEventListener('click', () =>
+    openImageLightbox(el.getAttribute('src'), el.dataset.name)));
 
   renderDetailBars();
 }
@@ -1224,7 +1336,14 @@ async function renderCompareTab() {
     <div id="cmp-body"></div>`;
 
   $$('[data-cmp]', root).forEach(cb => cb.addEventListener('change', () => {
-    if (cb.checked) CMP.sel.add(cb.dataset.cmp); else CMP.sel.delete(cb.dataset.cmp);
+    const id = cb.dataset.cmp;
+    if (cb.checked) {
+      CMP.sel.add(id);
+    } else {
+      CMP.sel.delete(id);
+      // Forget per-instance exclusions for a run once it leaves the comparison.
+      [...CMP.excluded].forEach(k => { if (k.startsWith(id + '|')) CMP.excluded.delete(k); });
+    }
     renderCompareBody();
   }));
   renderCompareBody();
@@ -1278,6 +1397,7 @@ async function compareRows() {
       }
       rows.push({
         runId: d.id, runName: d.name, algoId: a.id, algoKey: key,
+        included: !CMP.excluded.has(`${d.id}|${key}`),
         algoLabel: instLabel(d.algorithms, a),
         algoName: a.label,
         graphLabel: a.graph_label || null,
@@ -1309,14 +1429,14 @@ async function renderCompareBody() {
   const warns = [];
   if (mapSets.length > 1) warns.push('These runs used different map sets — metric differences may come from the maps, not the algorithms.');
 
-  const withVal = rows.filter(r => r.vals[barKey] != null);
+  const withVal = rows.filter(r => r.included && r.vals[barKey] != null);
   const maxVal = Math.max(...withVal.map(r => r.vals[barKey]), 0) || 1;
   const barsHTML = withVal
     .slice().sort((x, y) => x.vals[barKey] - y.vals[barKey])
     .map(r => `<div class="bar-row">
       <div class="b-label" title="${esc(paramsSummary(r.params))}">
         <span class="chip" style="${chipStyle(r.algoId)}"></span>
-        <span>${esc(r.runName)} · ${esc(r.algoLabel)}</span>
+        <span>${esc(cmpLabel(r))}</span>
       </div>
       <div class="b-track"><div class="b-fill" style="width:${Math.max(2, 100 * r.vals[barKey] / maxVal)}%"></div></div>
       <div class="b-val">${fmt(r.vals[barKey], 3)}</div>
@@ -1405,15 +1525,16 @@ async function renderCompareBody() {
       <h3>Hyperparameter sweep <span style="font-weight:400;color:var(--muted)">(same algorithm, varying one parameter)</span></h3>
       <div id="hp-panel"></div>
 
-      <h3>Details</h3>
+      <h3>Details <span style="font-weight:400;color:var(--muted)">(untick “Show” to drop an individual algorithm from the charts above)</span></h3>
       <div style="overflow-x:auto"><table class="data">
         <thead><tr>
-          <th>Run</th><th>Label</th><th>Hyperparameters</th><th>Map set</th>
+          <th>Show</th><th>Run</th><th>Label</th><th>Hyperparameters</th><th>Map set</th>
           <th class="num">Solved</th><th class="num">Mean time (s)</th>
           ${steerCols.map(c => `<th class="num">${esc(c.label)}</th>`).join('')}
         </tr></thead>
         <tbody>
-          ${rows.map((r, ri) => `<tr>
+          ${rows.map((r, ri) => `<tr class="${r.included ? '' : 'excluded-row'}">
+            <td><input type="checkbox" data-inc="${ri}" ${r.included ? 'checked' : ''} title="Include in the comparison"></td>
             <td><a class="plain" href="#" data-goto="${esc(r.runId)}">${esc(r.runName)}</a></td>
             <td><span class="algo-cell"><span class="chip" style="${chipStyle(r.algoId)}"></span>
               <span>${esc(r.graphLabel || r.algoName)}</span>
@@ -1446,6 +1567,12 @@ async function renderCompareBody() {
   }));
   $$('[data-edit-label]', body).forEach(b => b.addEventListener('click', () =>
     editGraphLabelFlow(rows[Number(b.dataset.editLabel)])));
+  $$('[data-inc]', body).forEach(cb => cb.addEventListener('change', () => {
+    const r = rows[Number(cb.dataset.inc)];
+    const key = `${r.runId}|${r.algoKey}`;
+    if (cb.checked) CMP.excluded.delete(key); else CMP.excluded.add(key);
+    renderCompareBody();
+  }));
   $('#gx-mode').addEventListener('change', e => { CMP.graph.mode = e.target.value; renderCompareBody(); });
   ['gx-x', 'gx-y', 'gx-z'].forEach((id, i) => {
     const el = $(`#${id}`);
@@ -1705,7 +1832,7 @@ function drawHpGraph(rows, targetCv) {
     // runs); X = swept parameter, same-X values averaged.
     const series = new Map();
     for (const r of rows) {
-      if (r.algoId !== CMP.hp.algo) continue;
+      if (r.algoId !== CMP.hp.algo || !r.included) continue;
       const x = Number((r.params || {})[p1]);
       const y = r.vals[yKey];
       if (!Number.isFinite(x) || y == null) continue;
@@ -1713,14 +1840,15 @@ function drawHpGraph(rows, targetCv) {
       delete rest[p1];
       const sig = JSON.stringify(rest);
       if (!series.has(sig)) {
-        series.set(sig, { label: paramsSummary(rest) || 'defaults', algoId: r.algoId, byX: new Map() });
+        series.set(sig, { fallback: paramsSummary(rest) || 'defaults', labels: [], byX: new Map() });
       }
       const s = series.get(sig);
+      s.labels.push(r.graphLabel);
       if (!s.byX.has(x)) s.byX.set(x, []);
       s.byX.get(x).push(y);
     }
     const lines = [...series.values()].map((s, i) => ({
-      ...s, idx: i,
+      label: hpLabel(s.labels, s.fallback), idx: i,
       pts: [...s.byX.entries()]
         .map(([x, ys]) => ({ x, y: ys.reduce((a, b) => a + b, 0) / ys.length }))
         .sort((a, b) => a.x - b.x),
@@ -1744,7 +1872,7 @@ function drawHpGraph(rows, targetCv) {
   // runs are averaged.
   const groups = new Map();
   for (const r of rows) {
-    if (r.algoId !== CMP.hp.algo) continue;
+    if (r.algoId !== CMP.hp.algo || !r.included) continue;
     const x = Number((r.params || {})[p1]);
     const y = Number((r.params || {})[p2]);
     const z = r.vals[yKey];
@@ -1754,14 +1882,15 @@ function drawHpGraph(rows, targetCv) {
     delete rest[p2];
     const sig = JSON.stringify(rest);
     if (!groups.has(sig)) {
-      groups.set(sig, { label: paramsSummary(rest) || 'defaults', byXY: new Map() });
+      groups.set(sig, { fallback: paramsSummary(rest) || 'defaults', labels: [], byXY: new Map() });
     }
     const g = groups.get(sig);
+    g.labels.push(r.graphLabel);
     const k = `${x}|${y}`;
     if (!g.byXY.has(k)) g.byXY.set(k, { x, y, zs: [] });
     g.byXY.get(k).zs.push(z);
   }
-  const seriesList = [...groups.values()].map((g, i) => ({ label: g.label, idx: i }));
+  const seriesList = [...groups.values()].map((g, i) => ({ label: hpLabel(g.labels, g.fallback), idx: i }));
   const pts = [];
   [...groups.values()].forEach((g, i) => {
     for (const cell of g.byXY.values()) {
@@ -1970,9 +2099,10 @@ function drawCompareGraph(rows, targetCv) {
   const is3d = zs !== 'none';
 
   const pts = rows
+    .filter(r => r.included)
     .map(r => ({
       x: r.vals[xs], y: r.vals[ys], z: is3d ? r.vals[zs] : 0,
-      label: `${r.runName} · ${r.algoLabel}`,
+      label: cmpLabel(r),
       algoId: r.algoId,
     }))
     .filter(p => p.x != null && p.y != null && (!is3d || p.z != null));
@@ -2171,7 +2301,7 @@ function drawLineGraph(rows, cv, offscreen) {
   const series = new Map();
   for (const r of rows) {
     const x = r.vals[xs], y = r.vals[ys];
-    if (x == null || y == null) continue;
+    if (!r.included || x == null || y == null) continue;
     const sig = r.algoId + '|' + JSON.stringify(r.params || {});
     if (!series.has(sig)) series.set(sig, { label: r.algoLabel, algoId: r.algoId, byX: new Map() });
     const s = series.get(sig);
@@ -2709,12 +2839,7 @@ function mountViewerND(mount, ms, entry, pathSpecs, grid) {
   try {
     [S.registry, S.system] = await Promise.all([api('/api/registry'), api('/api/system')]);
     await refreshLists();
-    // Sensible default: one instance of each algorithm that supports 2D.
-    if (!F.algoList.length) {
-      F.algoList = S.registry
-        .filter(spec => specSupports(spec, 2))
-        .map(spec => ({ id: spec.id, params: defaultParams(spec) }));
-    }
+    // The algorithm list starts empty — the user adds each algorithm to the run.
     renderJobsIndicator();
     renderRunTab();
     if (anyActivity()) ensurePolling();
