@@ -35,13 +35,19 @@ def _worker(conn, algo_id: str, params: dict, grid: np.ndarray, start: tuple, en
         spec = get_spec(algo_id)
         algo = spec.build(map_obj, params)
 
-        # Importing PyTorch in this fresh subprocess costs ~0.5s+ — that's
-        # environment setup, not algorithm work. Pre-import it here so the
-        # timed region below measures the solve itself.
+        # Importing PyTorch in this fresh subprocess costs ~0.5s+ and the first
+        # tensor/conv op pays one-time dispatcher + algorithm-selection setup —
+        # that's environment overhead, not algorithm work. Do it all here so
+        # the timed region below measures the solve itself.
         if (params or {}).get('use_gpu'):
-            import torch  # noqa: F401
-            if torch.cuda.is_available():
-                torch.cuda.init()   # CUDA context setup is also not solve time
+            import torch
+            import torch.nn.functional as tF
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            if device == 'cuda':
+                torch.cuda.init()
+            warm = torch.zeros((1, 1, 4, 4), dtype=torch.double, device=device)
+            tF.conv2d(warm, torch.zeros((1, 1, 3, 3), dtype=torch.double, device=device))
+            (warm + 1).sum().item()   # forces execution (and a CUDA sync when on GPU)
 
         t0 = time.perf_counter()
         path = algo.solve()

@@ -81,21 +81,19 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
     # Wavefront potential solve — PyTorch (CUDA when available)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _edge_pad_torch(t):
-        """Pad every dim by 1 with edge replication (works for any ndim,
-        unlike F.pad's 'replicate' which stops at 3 spatial dims)."""
-        import torch
-        for d in range(t.ndim):
-            first = t.narrow(d, 0, 1)
-            last = t.narrow(d, t.size(d) - 1, 1)
-            t = torch.cat([first, t, last], dim=d)
-        return t
-
     def _solve_phi_torch(self, grid, start, end):
         """Identical wavefront/boost logic; the 2·ndim face-neighbour average
         is computed with shifted tensor slices on the torch device."""
-        import torch
+        import torch   # lazy: torch is only required when use_gpu is set
+
+        def edge_pad(t):
+            # Pad every dim by 1 with edge replication (works for any ndim,
+            # unlike F.pad's 'replicate' which stops at 3 spatial dims).
+            for d in range(t.ndim):
+                first = t.narrow(d, 0, 1)
+                last = t.narrow(d, t.size(d) - 1, 1)
+                t = torch.cat([first, t, last], dim=d)
+            return t
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         ndim = grid.ndim
@@ -116,7 +114,7 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
 
         while not bool(solved[start_idx]):
             for _ in range(self.n_l):
-                padded = self._edge_pad_torch(phi)
+                padded = edge_pad(phi)
                 new_phi = torch.zeros_like(phi)
                 for d in range(ndim):
                     for direction in (slice(None, -2), slice(2, None)):
