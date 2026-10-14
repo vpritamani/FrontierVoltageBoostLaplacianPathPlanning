@@ -18,6 +18,21 @@ import traceback
 import numpy as np
 
 
+def describe_error(exc: BaseException, limit: int = 5) -> str:
+    """Error text with the reason first (the UI shows only its start).
+
+    Expected outcomes — a map outside an algorithm's world class, or an
+    external planner that is not set up — are reported by message alone;
+    anything else keeps the traceback after the summary for debugging.
+    """
+    summary = f'{type(exc).__name__}: {exc}'
+    if type(exc).__name__ == 'UnsupportedMapError':
+        return f'unsupported map: {exc}'
+    if isinstance(exc, ImportError):
+        return summary
+    return f'{summary}\n\n{traceback.format_exc(limit=limit)}'
+
+
 def _worker(conn, algo_id: str, params: dict, grid: np.ndarray, start: tuple, end: tuple):
     """Child-process entry: build map + algorithm, solve, send result back."""
     try:
@@ -58,9 +73,11 @@ def _worker(conn, algo_id: str, params: dict, grid: np.ndarray, start: tuple, en
             # decimal positions and metrics must be computed on the raw path.
             path = [tuple(float(c) for c in p) for p in path]
 
-        conn.send({'ok': True, 'path': path, 'time_s': elapsed})
-    except Exception:
-        conn.send({'ok': False, 'error': traceback.format_exc(limit=5)})
+        # Planners may say why they found no path (external wrappers do).
+        reason = getattr(algo, 'failure_reason', None) if path is None else None
+        conn.send({'ok': True, 'path': path, 'time_s': elapsed, 'reason': reason})
+    except Exception as exc:
+        conn.send({'ok': False, 'error': describe_error(exc, limit=5)})
     finally:
         conn.close()
 
@@ -126,5 +143,6 @@ def solve_with_timeout(algo_id: str, params: dict, grid: np.ndarray,
         'solved': path is not None and len(path) > 0,
         'path': path,
         'time_s': result['time_s'],
-        'error': None if path else 'algorithm returned no path',
+        'error': None if path else (f"no path: {result['reason']}" if result.get('reason')
+                                    else 'algorithm returned no path'),
     }

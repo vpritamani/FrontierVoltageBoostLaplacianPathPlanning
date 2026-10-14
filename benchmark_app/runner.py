@@ -24,18 +24,19 @@ results) is written through :mod:`benchmark_app.storage` as work progresses,
 so completed data survives restarts even if the app is killed mid-run.
 """
 
+import importlib.util
 import os
 import queue
+import subprocess
 import sys
 import threading
-import traceback
 from datetime import datetime
 
 import numpy as np
 
 from . import mapgen, storage
 from .registry import get_spec
-from .solver_worker import solve_with_timeout
+from .solver_worker import describe_error, solve_with_timeout
 
 _PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 if _PROJECT_ROOT not in sys.path:
@@ -262,9 +263,9 @@ def _worker_loop():
                 job['status'] = 'done'
         except _Cancelled:
             job['status'] = 'cancelled'
-        except Exception:
+        except Exception as exc:
             job['status'] = 'error'
-            job['error'] = traceback.format_exc(limit=8)
+            job['error'] = describe_error(exc, limit=8)
             run_id = job.get('payload', {}).get('run_id')
             if run_id:
                 try:
@@ -374,6 +375,43 @@ def _summarize(algorithms: list, results: list) -> list:
     return summary
 
 
+def _load_setup_external():
+    path = os.path.join(_PROJECT_ROOT, 'third_party', 'setup_external.py')
+    spec = importlib.util.spec_from_file_location('third_party_setup_external', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _ensure_external(job: dict, algorithms: list):
+    """Build any external planner the run needs but this interpreter lacks.
+
+    Runs ``third_party/setup_external.py`` with the app's own Python (so the
+    compiled modules match it) — a one-time fetch + build of ~30 s. If it
+    cannot succeed (no git / C++ compiler / pybind11) the run stops with the
+    reason instead of failing every cell.
+    """
+    needed = sorted({get_spec(a['id']).external for a in algorithms} - {None})
+    if not needed:
+        return
+    setup = _load_setup_external()
+    missing = [c for c in needed if not setup.is_ready(c)]
+    if not missing:
+        return
+    _set_progress(job, 0, 0, f"setting up external planners (one-time build): {', '.join(missing)}")
+    proc = subprocess.run([sys.executable, setup.__file__, *missing],
+                          capture_output=True, text=True, timeout=1800)
+    still = [c for c in missing if not setup.is_ready(c)]
+    if proc.returncode != 0 or still:
+        log = (proc.stdout + proc.stderr).strip().splitlines()
+        reason = next((l.strip() for l in reversed(log) if 'FAILED' in l or 'Error' in l),
+                      log[-1].strip() if log else 'unknown error')
+        raise RuntimeError(
+            f"external planner setup failed for {', '.join(still or missing)}: {reason} — "
+            f"run `python third_party/setup_external.py` in the project for the full log "
+            f"(needs git, a C++17 compiler and `pip install pybind11 pyyaml`)")
+
+
 def _execute_run(job: dict):
     run_id = job['payload']['run_id']
     manifest = storage.get_run(run_id)
@@ -415,6 +453,9 @@ def _execute_run(job: dict):
             if not get_spec(algo['id']).supports_dims(ms['dims']):
                 raise RuntimeError(
                     f"{algo['label']} does not support {ms['dims']}D maps")
+
+        # External planners are fetched + compiled once per machine/interpreter.
+        _ensure_external(job, manifest['algorithms'])
 
         # 'Use GPU' needs PyTorch (CUDA is used when available, CPU otherwise).
         if any((a.get('params') or {}).get('use_gpu') for a in manifest['algorithms']):

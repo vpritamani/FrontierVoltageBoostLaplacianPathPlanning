@@ -1,0 +1,46 @@
+diff --git a/NF/transformation.py b/NF/transformation.py
+index 52b6478..b02c43b 100644
+--- a/NF/transformation.py
++++ b/NF/transformation.py
+@@ -103,7 +103,9 @@ class ForestToStar(object):
+             height = 2 * (ws.center[1] - ws.height / 2 - (ws_son.center[1] - ws_son.height / 2))
+             width = 2 * height
+         _type = 'Rectangle'
+-        virtual_parent = Rectangular(_type, center, width - 0.16, height + 0.16)
++        # theta/s were missing (Rectangular requires them); axis-aligned and
++        # s = 0.99 as for the other virtual shapes (compute_virtual_length_ray)
++        virtual_parent = Rectangular(_type, center, width - 0.16, height + 0.16, 0.0, 0.99)
+         return virtual_parent
+     
+     def compute_all_leaves_beta(self, q: np.ndarray, d: int) -> list:
+@@ -458,7 +460,7 @@ class SphereToPoint(object):
+         return (q - center) * weight + center
+     
+     def compute_T_q(self, q: np.ndarray) -> np.ndarray:
+-        T = q
++        T = np.array(q, dtype=float)   # copy: `T = q` + `T +=` mutated q in place
+         for obs in self.world.obstacles:
+             T += self.compute_T_q_i(q, obs[0])
+         return T
+diff --git a/NF/utils.py b/NF/utils.py
+index e98b7e0..5e30fc7 100644
+--- a/NF/utils.py
++++ b/NF/utils.py
+@@ -26,6 +26,8 @@ def compute_squicle_length_ray(width, height, q, theta, s):
+     rotation = np.array([[np.cos(theta), np.sin(theta)],
+                          [-np.sin(theta), np.cos(theta)]])
+     q = rotation @ q
++    if np.linalg.norm(q) == 0.0:
++        return 0.0   # ray direction undefined at the centre (was 0/0 -> NaN); callers scale it by q - centre = 0
+     normalized_q = q / np.linalg.norm(q)
+     transformed_q = np.array([normalized_q[0] / width, normalized_q[1] / height])
+     normalized_transformed_q = transformed_q / np.linalg.norm(transformed_q)
+@@ -37,6 +39,8 @@ def compute_squicle_length_ray_plt(q, width, height, theta, s):
+     rotation = np.array([[np.cos(theta), np.sin(theta)],
+                          [-np.sin(theta), np.cos(theta)]])
+     q = rotation @ q
++    if np.linalg.norm(q) == 0.0:
++        return 0.0   # ray direction undefined at the centre (was 0/0 -> NaN); callers scale it by q - centre = 0
+     normalized_q = q / np.linalg.norm(q)
+     transformed_q = np.array([normalized_q[0] / width, normalized_q[1] / height])
+     normalized_transformed_q = transformed_q / np.linalg.norm(transformed_q)

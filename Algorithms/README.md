@@ -96,3 +96,14 @@ path = algo.result()                # list of (x, y) or (x, y, z) tuples
 ```python
 AStarAlgorithm.is_solvable(grid, start, end, timeout=30.0)  # -> bool
 ```
+
+---
+
+## External Algorithms
+
+`External Algorithms/` wraps upstream implementations of competing planners
+(Fast Marching Method, Koditschek–Rimon navigation function, hntf2d harmonic
+maps, CustFields harmonic potential fields) in the same interface. Their
+sources are pinned and built by `python third_party/setup_external.py`; see
+[third_party/README.md](../third_party/README.md) for details and caveats.
+

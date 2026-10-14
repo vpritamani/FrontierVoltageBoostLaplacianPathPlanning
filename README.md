@@ -16,6 +16,15 @@ pip install numpy scipy pillow flask rtree
 pip install torch        # optional — enables the "Use GPU (PyTorch)" algorithm variants
 ```
 
+Optional — the external comparison planners (Fast Marching, Koditschek–Rimon navigation function, hntf2d harmonic maps, CustFields) need `pip install pybind11 pyyaml`, git and a C++17 compiler. The app fetches and builds them automatically (once, ~30 s) the first time a run uses them; to do it ahead of time or check a machine:
+
+```bash
+python third_party/setup_external.py             # fetch pinned upstream sources + build
+python third_party/setup_external.py --selftest  # verify every planner solves a small map
+```
+
+See [third_party/README.md](third_party/README.md) for what each wrapper does, licenses, and caveats when comparing. Note: the Koditschek–Rimon navigation function is a Python translation of nfsim's MATLAB code (no MATLAB needed); the other three call the upstream code directly.
+
 (`rtree` is used by the incremental RRT–Laplace planners for tree connectivity; `pip install rtree` ships the native library, no extra setup.)
 
 `pip install -e .` registers `Algorithms`, `map_generation`, and `smoothness_metrics` on your Python path so all imports work without any manual path setup. You only need to do this once per environment.
@@ -113,6 +122,12 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   └── Incremental Algorithms/
 │       ├── rrtlaplacerandomsampling.py  # RRTLaplaceRandomSampling (2D)
 │       └── rrtlaplacefrontier.py        # RRTLaplaceFrontier (2D)
+│   └── External Algorithms/      # wrappers around upstream planners (third_party/)
+│       ├── externalcommon.py     # shared descent + grid→geometry helpers
+│       ├── fastmarching.py       # FastMarchingAlgorithm (2–6D)
+│       ├── navigationfunction.py # KoditschekRimonNF (any dimensionality)
+│       ├── harmonicmap2d.py      # HarmonicMapNavigation2D (hntf2d)
+│       └── customfields.py       # CustomHarmonicFields2D (cust_fields)
 ├── Map Generation/
 │   ├── map.py                    # Map base class
 │   ├── 2dmap.py                  # Map2D
@@ -132,6 +147,9 @@ FrontierVoltageBoostLaplacianPathPlanning/
 │   ├── storage.py                # Benchmark Data/ persistence
 │   └── static/                   # UI (index.html, app.js, style.css)
 ├── Benchmark Data/               # generated map sets + run results (app-managed)
+├── third_party/                  # pinned upstream planners: setup_external.py fetches + builds
+│   ├── setup_external.py
+│   └── bindings/                 # pybind11 bindings for the C++ planners
 ├── run_app.py                    # ← one command to launch the app
 ├── pyproject.toml
 └── README.md
@@ -145,7 +163,9 @@ FrontierVoltageBoostLaplacianPathPlanning/
 BaseAlgorithm  (algorithm.py)
 ├── Algorithm2D  (2dalgorithm.py)        — for algorithms that only work in 2D
 │   ├── FrontierVoltageBoostLaplace
-│   └── PotentialFieldAlgorithm  (potentialfield2d.py)
+│   ├── PotentialFieldAlgorithm  (potentialfield2d.py)
+│   ├── HarmonicMapNavigation2D  (harmonicmap2d.py)  — external: hntf2d
+│   └── CustomHarmonicFields2D  (customfields.py)    — external: cust_fields
 ├── Algorithm3D  (3dalgorithm.py)        — for algorithms that only work in 3D
 │   └── FrontierVoltageBoostLaplace3D
 │   ├── FrontierVoltageBoostLaplaceND  (ndfrontiervoltageboostlaplace.py) — any dimensionality
@@ -153,7 +173,9 @@ BaseAlgorithm  (algorithm.py)
 │   └── RRTLaplaceFrontier  (rrtlaplacefrontier.py) — 2D incremental
 ├── PotentialFieldAlgorithmND  (potentialfieldnd.py) — any dimensionality
 ├── AStarAlgorithm  (astar.py)           — dimension-agnostic, reads grid.ndim at solve time
-└── RRTAlgorithm  (rrt.py)               — dimension-agnostic, continuous (decimal) node positions
+├── RRTAlgorithm  (rrt.py)               — dimension-agnostic, continuous (decimal) node positions
+├── FastMarchingAlgorithm  (fastmarching.py)    — external: thinks/fast-marching-method, 2–6D
+└── KoditschekRimonNF  (navigationfunction.py)  — external: nfsim KR navigation function port, any dims
 ```
 
 All algorithms except A* accept `use_gpu=True` for a PyTorch implementation (CUDA when available, CPU-PyTorch fallback otherwise); the default NumPy paths are unchanged and produce numerically identical results.
