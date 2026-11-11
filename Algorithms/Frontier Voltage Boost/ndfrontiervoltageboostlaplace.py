@@ -68,7 +68,7 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
             for _ in range(self.n_l):
                 self._laplace_step(phi, free, end_idx)
 
-            s_new = free & (phi <= v_max - self.epsilon)
+            s_new = free & (phi < v_max - self.epsilon)
             solved |= s_new
             free   &= ~s_new
 
@@ -125,7 +125,7 @@ class FrontierVoltageBoostLaplaceND(BaseAlgorithm):
                 phi = torch.where(free, new_phi, phi)
                 phi[end_idx] = 0.0
 
-            s_new = free & (phi <= v_max - self.epsilon)
+            s_new = free & (phi < v_max - self.epsilon)
             solved |= s_new
             free &= ~s_new
 
